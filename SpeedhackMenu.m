@@ -270,7 +270,7 @@ static KeyAuthManager *sharedAuth = nil;
     if (!rootVC) return;
 
     NSString *title = @"KÍCH HOẠT KEY (24H)";
-    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Nhấn giữ 5s để mở bảng này. Nhập key tương ứng trong ngày để kích hoạt)", deviceID];
+   NSString *msg = [NSString stringWithFormat:@"Mã máy: %@\nKey đúng của máy hiện tại:\n%@\n\n(Dán key này vào ô dưới)", deviceID, expectedKey];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
 
