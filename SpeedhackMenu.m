@@ -12,7 +12,7 @@ extern void set_speed_factor(float factor);
 #define KEY_STORAGE @"SAVED_SPEEDHACK_LICENSE_KEY"
 #define EXPIRE_STORAGE @"SPEEDHACK_EXPIRATION_TIME"
 #define SECRET_SALT @"SECRET_SALT_2026"
-#define DURATION_TEST (2 * 60) // 2 phút test (khi hoàn thiện đổi thành 24 * 60 * 60)
+#define DURATION_TEST (2 * 60) // 2 phút test (sau này đổi thành 24 * 60 * 60)
 #define SPEED_MULTIPLIER 5.0f
 
 @protocol SpeedhackButtonDelegate <NSObject>
@@ -20,6 +20,7 @@ extern void set_speed_factor(float factor);
 @end
 
 @interface SpeedhackFloatingButton : UIButton
+@property (nonatomic, assign) BOOL isSpeedOn;
 @property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
 @property (nonatomic, strong) NSTimer *countdownTimer;
@@ -44,8 +45,9 @@ extern void set_speed_factor(float factor);
         longPress.minimumPressDuration = 5.0;
         [self addGestureRecognizer:longPress];
 
-        [self addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
+        [self addTarget:self action:@selector(toggleSpeed) forControlEvents:UIControlEventTouchUpInside];
 
+        _isSpeedOn = YES;
         _isLocked = NO;
         [self updateButtonUI];
         [self resetIdleTimer];
@@ -60,27 +62,31 @@ extern void set_speed_factor(float factor);
     
     if (_isLocked) {
         set_speed_factor(1.0f);
+        _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
         [self setTitle:@"LOCK" forState:UIControlStateNormal];
         self.alpha = 0.1;
     } else {
-        // Luôn luôn duy trì 5X khi đã mở khóa
+        _isSpeedOn = YES;
         set_speed_factor(SPEED_MULTIPLIER);
         [self updateButtonUI];
         [self resetIdleTimer];
     }
 }
 
-// Bù trừ thời gian chạy nhanh 5x để đếm lùi chuẩn từng giây đời thực
+// Bù trừ toán học: Chia cho 5 để triệt tiêu việc bị tua x5
 - (NSString *)formattedRemainingTime {
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
     double now = [[NSDate date] timeIntervalSince1970];
+    
+    // Khoảng cách thời gian hệ thống đang bị chạy nhanh x5
     double diff = expireTime - now;
 
     if (diff <= 0) return @"00:00";
 
-    NSInteger remaining = (NSInteger)(diff / SPEED_MULTIPLIER);
+    // Khi bật x5 thì chia 5 để đưa về giây thực tế 1x
+    NSInteger remaining = _isSpeedOn ? (NSInteger)(diff / SPEED_MULTIPLIER) : (NSInteger)diff;
 
     if (remaining <= 0) return @"00:00";
 
@@ -99,7 +105,7 @@ extern void set_speed_factor(float factor);
     [self stopCountdown];
     [self refreshButtonContent];
 
-    // Cứ 0.2s game = 1s đời thực
+    // Cứ 0.2s gọi 1 lần (vì game x5 nên 0.2s game = 1s đời thực)
     self.countdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 
                                                            target:self 
                                                          selector:@selector(refreshButtonContent) 
@@ -113,7 +119,7 @@ extern void set_speed_factor(float factor);
 }
 
 - (void)refreshButtonContent {
-    if (_isLocked) {
+    if (_isLocked || !_isSpeedOn) {
         [self stopCountdown];
         return;
     }
@@ -124,14 +130,23 @@ extern void set_speed_factor(float factor);
 - (void)updateButtonUI {
     if (_isLocked) return;
 
-    self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
-    self.layer.borderColor = [UIColor whiteColor].CGColor;
-    [self startCountdown];
+    if (_isSpeedOn) {
+        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
+        self.layer.borderColor = [UIColor whiteColor].CGColor;
+        [self startCountdown];
+    } else {
+        [self stopCountdown];
+        self.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9];
+        self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
+        [self setTitle:@"TẮT" forState:UIControlStateNormal];
+    }
 }
 
-// Chạm vào nút chỉ làm sáng lại 100% chứ không tắt speed
-- (void)handleTap {
+- (void)toggleSpeed {
     if (_isLocked) return;
+    _isSpeedOn = !_isSpeedOn;
+    set_speed_factor(_isSpeedOn ? SPEED_MULTIPLIER : 1.0f);
+    [self updateButtonUI];
     [self resetIdleTimer];
 }
 
@@ -347,7 +362,8 @@ static KeyAuthManager *sharedAuth = nil;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
         if ([inputKey isEqualToString:expectedKey]) {
-            // Khi bật speedhack x5, thời gian trong app chạy nhanh gấp 5 lần
+            // Khi bật speedhack x5, thời gian trong app chạy nhanh gấp 5 lần.
+            // Vì vậy thời hạn test 120s đời thực tương đương với 120 * 5 = 600s trong app.
             NSTimeInterval realDurationInGame = DURATION_TEST * SPEED_MULTIPLIER;
             double expireTime = [[NSDate date] timeIntervalSince1970] + realDurationInGame;
             
