@@ -57,7 +57,7 @@ extern void set_speed_factor(float factor);
     [self.idleTimer invalidate];
     
     if (_isLocked) {
-        set_speed_factor(1.0f);
+        set_speed_factor(1.0f);[cite: 3, 4]
         _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
@@ -65,7 +65,7 @@ extern void set_speed_factor(float factor);
         self.alpha = 0.1;
     } else {
         _isSpeedOn = YES;
-        set_speed_factor(5.0f);
+        set_speed_factor(5.0f);[cite: 3, 4]
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -89,7 +89,7 @@ extern void set_speed_factor(float factor);
     if (_isLocked) return;
     _isSpeedOn = !_isSpeedOn;
     [self updateButtonUI];
-    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);
+    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);[cite: 3, 4]
     [self resetIdleTimer];
 }
 
@@ -150,6 +150,9 @@ extern void set_speed_factor(float factor);
 
 @end
 
+// ==========================================
+// MANAGER XÁC THỰC VÀ ĐIỀU PHỐI BẢN QUYỀN
+// ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
 @property (nonatomic, strong) NSTimer *expirationWatcherTimer;
@@ -191,8 +194,14 @@ static KeyAuthManager *sharedAuth = nil;
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 }
 
+// Hàm tạo Key động theo ngày: MãMáy + ddMMyyyy + _SECRET_SALT_2026
 - (NSString *)generateValidKeyForDevice:(NSString *)deviceID {
-    NSString *rawInput = [NSString stringWithFormat:@"%@_%@", deviceID, SECRET_SALT];
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"ddMMyyyy"];
+    [formatter setTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Ho_Chi_Minh"]];
+    NSString *currentDateStr = [formatter stringFromDate:[NSDate date]];
+
+    NSString *rawInput = [NSString stringWithFormat:@"%@%@_%@", deviceID, currentDateStr, SECRET_SALT];
     const char *cStr = [rawInput UTF8String];
     unsigned char digest[CC_MD5_DIGEST_LENGTH];
     CC_MD5(cStr, (CC_LONG)strlen(cStr), digest);
@@ -221,6 +230,7 @@ static KeyAuthManager *sharedAuth = nil;
     NSTimeInterval expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 
+    // Kiểm tra: Key trùng khớp VÀ chưa quá 24h
     if (savedKey && [savedKey isEqualToString:expectedKey] && now < expireTime) {
         [self.floatingButton setLockedState:NO];
         
@@ -262,7 +272,7 @@ static KeyAuthManager *sharedAuth = nil;
     if (!rootVC) return;
 
     NSString *title = @"KÍCH HOẠT KEY (24H)";
-    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Sao chép mã gửi admin để nhận Key kích hoạt 24h)", deviceID];
+    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Nhấn giữ 5s để mở bảng này. Nhập key tương ứng trong ngày để kích hoạt)", deviceID];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
 
@@ -280,18 +290,20 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *inputKey = alert.textFields.firstObject.text;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
+        // So khớp key nhập vào với key tính toán trong ngày
         if ([inputKey isEqualToString:expectedKey]) {
             NSTimeInterval expireTime = [[NSDate date] timeIntervalSince1970] + DURATION_24H;
             [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
             [[NSUserDefaults standardUserDefaults] setDouble:expireTime forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
+            // Mở khóa nút nổi và bật tốc độ 5x
             [self.floatingButton setLockedState:NO];
 
             [self.expirationWatcherTimer invalidate];
             self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
         } else {
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Sai Key" message:@"Mã Key không chính xác cho thiết bị này." preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Sai Key" message:@"Mã Key không chính xác hoặc đã hết hạn trong ngày hôm nay." preferredStyle:UIAlertControllerStyleAlert];
             [err addAction:[UIAlertAction actionWithTitle:@"Nhập Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
                 [self showKeyInputDialogOn:rootVC deviceID:deviceID expectedKey:expectedKey];
             }]];
