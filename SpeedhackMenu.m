@@ -20,7 +20,7 @@ extern void set_speed_factor(float factor);
 
 @interface SpeedhackFloatingButton : UIButton
 @property (nonatomic, assign) BOOL isSpeedOn;
-@property (nonatomic, assign) BOOL isLocked; // YES khi key hết hạn
+@property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
 @property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
 @end
@@ -35,16 +35,13 @@ extern void set_speed_factor(float factor);
         self.layer.borderWidth = 1.5;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
         
-        // Cử chỉ kéo thả (Pan)
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
 
-        // Cử chỉ nhấn giữ 5 giây để nhập key khi bị khóa
         UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        longPress.minimumPressDuration = 5.0; // Đúng 5 giây
+        longPress.minimumPressDuration = 5.0;
         [self addGestureRecognizer:longPress];
 
-        // Chạm vào để đổi 1x / 5x
         [self addTarget:self action:@selector(toggleSpeed) forControlEvents:UIControlEventTouchUpInside];
 
         _isSpeedOn = YES;
@@ -60,16 +57,15 @@ extern void set_speed_factor(float factor);
     [self.idleTimer invalidate];
     
     if (_isLocked) {
-        // Khóa tính năng: ép tốc độ về 1x, hiển thị màu xám khóa và mờ 10%
-        set_speed_factor(1.0f);[cite: 3, 4]
+        set_speed_factor(1.0f);
         _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
         [self setTitle:@"LOCK" forState:UIControlStateNormal];
-        self.alpha = 0.1; // Luôn mờ 10% khi hết hạn
+        self.alpha = 0.1;
     } else {
         _isSpeedOn = YES;
-        set_speed_factor(5.0f);[cite: 3, 4]
+        set_speed_factor(5.0f);
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -89,19 +85,14 @@ extern void set_speed_factor(float factor);
     }
 }
 
-// Bấm nút: Chỉ có tác dụng khi CÒN HẠN
 - (void)toggleSpeed {
-    if (_isLocked) {
-        // Khi bị khóa, không làm gì cả, giữ nguyên độ mờ 10%
-        return;
-    }
+    if (_isLocked) return;
     _isSpeedOn = !_isSpeedOn;
     [self updateButtonUI];
-    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);[cite: 3, 4]
+    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);
     [self resetIdleTimer];
 }
 
-// Nhấn giữ 5 giây
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         if (_isLocked && [self.delegate respondsToSelector:@selector(onLongPressFiveSeconds)]) {
@@ -153,15 +144,12 @@ extern void set_speed_factor(float factor);
 
 - (void)dimButton {
     [UIView animateWithDuration:0.5 animations:^{
-        self.alpha = 0.1; // Mờ 10%
+        self.alpha = 0.1;
     }];
 }
 
 @end
 
-// ==========================================
-// MANAGER XÁC THỰC VÀ ĐIỀU PHỐI
-// ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
 @property (nonatomic, strong) NSTimer *expirationWatcherTimer;
@@ -234,13 +222,11 @@ static KeyAuthManager *sharedAuth = nil;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 
     if (savedKey && [savedKey isEqualToString:expectedKey] && now < expireTime) {
-        // Còn hạn: Mở khóa
         [self.floatingButton setLockedState:NO];
         
         [self.expirationWatcherTimer invalidate];
         self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
     } else {
-        // Hết hạn hoặc chưa kích hoạt: Khóa nút, ẩn tính năng
         [self lockSpeedhack];
     }
 }
@@ -263,11 +249,9 @@ static KeyAuthManager *sharedAuth = nil;
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:EXPIRE_STORAGE];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    // Khóa nút trên màn hình: về 1x, vô hiệu hóa touch, mờ 10%
     [self.floatingButton setLockedState:YES];
 }
 
-// Delegate nhận sự kiện: Người dùng nhấn giữ 5 giây vào nút mờ
 - (void)onLongPressFiveSeconds {
     NSString *deviceID = [self getDeviceID];
     NSString *expectedKey = [self generateValidKeyForDevice:deviceID];
@@ -302,14 +286,13 @@ static KeyAuthManager *sharedAuth = nil;
             [[NSUserDefaults standardUserDefaults] setDouble:expireTime forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
-            // Mở khóa lại nút nổi và bật 5x
             [self.floatingButton setLockedState:NO];
 
             [self.expirationWatcherTimer invalidate];
             self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
         } else {
             UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Sai Key" message:@"Mã Key không chính xác cho thiết bị này." preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            [err addAction:[UIAlertAction actionWithTitle:@"Nhập Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
                 [self showKeyInputDialogOn:rootVC deviceID:deviceID expectedKey:expectedKey];
             }]];
             [rootVC presentViewController:err animated:YES completion:nil];
