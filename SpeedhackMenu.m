@@ -164,7 +164,6 @@ static void sync_time_from_internet(void (^completion)(BOOL success)) {
     [self stopCountdown];
     [self refreshButtonContent];
 
-    // Dùng GCD Dispatch Timer chạy theo thời gian thực để không bị dính hook RunLoop
     self.countdownSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(self.countdownSource, dispatch_walltime(NULL, 0), 1ull * NSEC_PER_SEC, 0);
 
@@ -233,10 +232,10 @@ static void sync_time_from_internet(void (^completion)(BOOL success)) {
             [self bringToFullAlpha];
             [self.idleTimer invalidate];
         }
-    } else if (pan.state == UIPanGestureRecognizerStateChanged) {
+    } else if (pan.state == UIGestureRecognizerStateChanged) {
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [pan setTranslation:CGPointZero inView:superview];
-    } else if (pan.state == UIPanGestureRecognizerStateEnded || pan.state == UIPanGestureRecognizerStateCancelled) {
+    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
         CGFloat midX = superview.bounds.size.width / 2.0;
         CGFloat targetX = (self.center.x < midX) ? (self.frame.size.width / 2.0 + 8) : (superview.bounds.size.width - self.frame.size.width / 2.0 - 8);
         CGFloat targetY = MIN(MAX(self.center.y, 60), superview.bounds.size.height - 60);
@@ -291,7 +290,6 @@ static KeyAuthManager *sharedAuth = nil;
             sharedAuth = [[KeyAuthManager alloc] init];
             sharedAuth.appWindow = window;
             
-            // Đồng bộ giờ từ Server trước khi nạp giao diện
             sync_time_from_internet(^(BOOL success) {
                 [sharedAuth initialSetup];
             });
@@ -326,14 +324,17 @@ static KeyAuthManager *sharedAuth = nil;
     [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"]];
     [formatter setCalendar:[[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian]];
     
-    // Tạo ngày theo giờ chuẩn Internet hiện tại
     NSDate *currentDate = [NSDate dateWithTimeIntervalSince1970:get_current_real_time()];
     NSString *dateStr = [formatter stringFromDate:currentDate];
     NSString *rawInput = [NSString stringWithFormat:@"%@%@_%@", deviceID, dateStr, SECRET_SALT];
 
     const char *cStr = [rawInput UTF8String];
     unsigned char digest[CC_MD5_DIGEST_LENGTH];
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     CC_MD5(cStr, (CC_LONG)strlen(cStr), digest);
+#pragma clang diagnostic pop
     
     NSMutableString *hash = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
     for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
@@ -436,7 +437,6 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *inputKey = alert.textFields.firstObject.text;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
-        // Đồng bộ lại giờ trước khi kích hoạt
         sync_time_from_internet(^(BOOL success) {
             NSString *freshExpectedKey = [self generateValidKeyForDevice:deviceID];
             
