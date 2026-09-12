@@ -12,7 +12,7 @@ extern void set_speed_factor(float factor);
 #define KEY_STORAGE @"SAVED_SPEEDHACK_LICENSE_KEY"
 #define EXPIRE_STORAGE @"SPEEDHACK_EXPIRATION_TIME"
 #define SECRET_SALT @"SECRET_SALT_2026"
-#define DURATION_TEST (2 * 60) // Thời gian test 2 phút (đổi thành 24 * 60 * 60 khi thương mại)
+#define DURATION_TEST (2 * 60) // 2 phút test (đổi thành 24 * 60 * 60 khi dùng thật)
 
 @protocol SpeedhackButtonDelegate <NSObject>
 - (void)onLongPressFiveSeconds;
@@ -34,9 +34,8 @@ extern void set_speed_factor(float factor);
         self.layer.cornerRadius = frame.size.width / 2.0;
         self.layer.masksToBounds = YES;
         self.layer.borderWidth = 1.5;
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
-        self.titleLabel.numberOfLines = 2; // Hiển thị 2 dòng: BẬT \n [thời gian]
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
@@ -75,27 +74,22 @@ extern void set_speed_factor(float factor);
     }
 }
 
-// Logic rút gọn thời gian theo yêu cầu:
-// >= 1h: hiện Xh (ví dụ >2h là 2h, >1h là 1h)
-// < 1h: hiện Xp (ví dụ 59p)
-// < 1p: hiện Xs động (ví dụ 45s)
+// Hiển thị trực tiếp giờ:phút:giây hoặc phút:giây
 - (NSString *)formattedRemainingTime {
     NSTimeInterval expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     NSInteger remaining = (NSInteger)(expireTime - now);
 
-    if (remaining <= 0) return @"0s";
+    if (remaining <= 0) return @"00:00";
 
     NSInteger hours = remaining / 3600;
     NSInteger minutes = (remaining % 3600) / 60;
     NSInteger seconds = remaining % 60;
 
-    if (hours >= 1) {
-        return [NSString stringWithFormat:@"%ldh", (long)hours];
-    } else if (minutes >= 1) {
-        return [NSString stringWithFormat:@"%ldp", (long)minutes];
+    if (hours > 0) {
+        return [NSString stringWithFormat:@"%02ld:%02ld:%02ld", (long)hours, (long)minutes, (long)seconds];
     } else {
-        return [NSString stringWithFormat:@"%lds", (long)seconds];
+        return [NSString stringWithFormat:@"%02ld:%02ld", (long)minutes, (long)seconds];
     }
 }
 
@@ -120,8 +114,7 @@ extern void set_speed_factor(float factor);
         return;
     }
     NSString *timeStr = [self formattedRemainingTime];
-    NSString *fullTitle = [NSString stringWithFormat:@"BẬT\n%@", timeStr];
-    [self setTitle:fullTitle forState:UIControlStateNormal];
+    [self setTitle:timeStr forState:UIControlStateNormal];
 }
 
 - (void)updateButtonUI {
@@ -271,6 +264,7 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (void)initialSetup {
     if (!self.floatingButton && self.appWindow) {
+        // Nút tròn 46x46 vừa vặn chứa số giờ:phút:giây
         self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 54, 120, 46, 46)];
         self.floatingButton.delegate = self;
         [self.appWindow addSubview:self.floatingButton];
