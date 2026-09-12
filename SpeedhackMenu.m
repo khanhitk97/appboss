@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,9 +13,75 @@ extern void set_speed_factor(float factor);
 #define KEY_STORAGE @"SAVED_SPEEDHACK_LICENSE_KEY"
 #define EXPIRE_STORAGE @"SPEEDHACK_EXPIRATION_TIME"
 #define SECRET_SALT @"SECRET_SALT_2026"
-#define DURATION_TEST (2 * 60) // 2 phút test (sau này đổi thành 24 * 60 * 60)
+#define DURATION_TEST (2 * 60) // 2 phút test (khi hoàn thiện đổi thành 24 * 60 * 60)
 #define SPEED_MULTIPLIER 5.0f
 
+// ==========================================
+// ĐỒNG HỒ THỜI GIAN THỰC (INTERNET + HARDWARE)
+// ==========================================
+static uint64_t get_raw_hardware_tick(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (uint64_t)ts.tv_sec;
+}
+
+static int64_t g_network_time_offset = 0;
+static BOOL g_has_synced_network_time = NO;
+
+// Lấy thời gian Internet thực tế tại thời điểm gọi
+static uint64_t get_current_real_time(void) {
+    if (!g_has_synced_network_time) {
+        return (uint64_t)[[NSDate date] timeIntervalSince1970];
+    }
+    return (uint64_t)(get_raw_hardware_tick() + g_network_time_offset);
+}
+
+// Đồng bộ giờ từ Server (Google) bằng HTTP HEAD Header 'Date'
+static void sync_time_from_internet(void (^completion)(BOOL success)) {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://www.google.com"]
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData 
+                                                       timeoutInterval:5.0];
+    request.HTTPMethod = @"HEAD";
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        if (!error && [response isKindOfClass:[NSHTTPURLResponse class]]) {
+            NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+            NSString *dateStr = httpResponse.allHeaderFields[@"Date"];
+            
+            if (dateStr) {
+                NSDateFormatter *rfc1123 = [[NSDateFormatter alloc] init];
+                [rfc1123 setDateFormat:@"EEE, dd MMM yyyy HH:mm:ss z"];
+                [rfc1123 setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"]];
+                [rfc1123 setTimeZone:[NSTimeZone timeZoneWithAbbreviation:@"GMT"]];
+                
+                NSDate *serverDate = [rfc1123 dateFromString:dateStr];
+                if (serverDate) {
+                    uint64_t serverSec = (uint64_t)[serverDate timeIntervalSince1970];
+                    uint64_t hardwareTick = get_raw_hardware_tick();
+                    g_network_time_offset = (int64_t)serverSec - (int64_t)hardwareTick;
+                    g_has_synced_network_time = YES;
+                    
+                    if (completion) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            completion(YES);
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(NO);
+            });
+        }
+    }];
+    [task resume];
+}
+
+// ==========================================
+// GIAO DIỆN NÚT NỔI (FLOATING BUTTON)
+// ==========================================
 @protocol SpeedhackButtonDelegate <NSObject>
 - (void)onLongPressFiveSeconds;
 @end
@@ -23,7 +90,7 @@ extern void set_speed_factor(float factor);
 @property (nonatomic, assign) BOOL isSpeedOn;
 @property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
-@property (nonatomic, strong) NSTimer *countdownTimer;
+@property (nonatomic, strong) dispatch_source_t countdownSource;
 @property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
 @end
 
@@ -75,18 +142,10 @@ extern void set_speed_factor(float factor);
     }
 }
 
-// Bù trừ toán học: Chia cho 5 để triệt tiêu việc bị tua x5
 - (NSString *)formattedRemainingTime {
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
-    
-    // Khoảng cách thời gian hệ thống đang bị chạy nhanh x5
-    double diff = expireTime - now;
-
-    if (diff <= 0) return @"00:00";
-
-    // Khi bật x5 thì chia 5 để đưa về giây thực tế 1x
-    NSInteger remaining = _isSpeedOn ? (NSInteger)(diff / SPEED_MULTIPLIER) : (NSInteger)diff;
+    uint64_t now = get_current_real_time();
+    NSInteger remaining = (NSInteger)(expireTime - now);
 
     if (remaining <= 0) return @"00:00";
 
@@ -105,17 +164,22 @@ extern void set_speed_factor(float factor);
     [self stopCountdown];
     [self refreshButtonContent];
 
-    // Cứ 0.2s gọi 1 lần (vì game x5 nên 0.2s game = 1s đời thực)
-    self.countdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 
-                                                           target:self 
-                                                         selector:@selector(refreshButtonContent) 
-                                                         userInfo:nil 
-                                                          repeats:YES];
+    // Dùng GCD Dispatch Timer chạy theo thời gian thực để không bị dính hook RunLoop
+    self.countdownSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(self.countdownSource, dispatch_walltime(NULL, 0), 1ull * NSEC_PER_SEC, 0);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.countdownSource, ^{
+        [weakSelf refreshButtonContent];
+    });
+    dispatch_resume(self.countdownSource);
 }
 
 - (void)stopCountdown {
-    [self.countdownTimer invalidate];
-    self.countdownTimer = nil;
+    if (self.countdownSource) {
+        dispatch_source_cancel(self.countdownSource);
+        self.countdownSource = nil;
+    }
 }
 
 - (void)refreshButtonContent {
@@ -169,10 +233,10 @@ extern void set_speed_factor(float factor);
             [self bringToFullAlpha];
             [self.idleTimer invalidate];
         }
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
+    } else if (pan.state == UIPanGestureRecognizerStateChanged) {
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [pan setTranslation:CGPointZero inView:superview];
-    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
+    } else if (pan.state == UIPanGestureRecognizerStateEnded || pan.state == UIPanGestureRecognizerStateCancelled) {
         CGFloat midX = superview.bounds.size.width / 2.0;
         CGFloat targetX = (self.center.x < midX) ? (self.frame.size.width / 2.0 + 8) : (superview.bounds.size.width - self.frame.size.width / 2.0 - 8);
         CGFloat targetY = MIN(MAX(self.center.y, 60), superview.bounds.size.height - 60);
@@ -212,7 +276,7 @@ extern void set_speed_factor(float factor);
 // ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
-@property (nonatomic, strong) NSTimer *heartbeatTimer;
+@property (nonatomic, strong) dispatch_source_t heartbeatSource;
 @property (nonatomic, weak) UIWindow *appWindow;
 @end
 
@@ -226,7 +290,11 @@ static KeyAuthManager *sharedAuth = nil;
         if (window && window.rootViewController) {
             sharedAuth = [[KeyAuthManager alloc] init];
             sharedAuth.appWindow = window;
-            [sharedAuth initialSetup];
+            
+            // Đồng bộ giờ từ Server trước khi nạp giao diện
+            sync_time_from_internet(^(BOOL success) {
+                [sharedAuth initialSetup];
+            });
         }
     });
 }
@@ -258,7 +326,9 @@ static KeyAuthManager *sharedAuth = nil;
     [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"]];
     [formatter setCalendar:[[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian]];
     
-    NSString *dateStr = [formatter stringFromDate:[NSDate date]];
+    // Tạo ngày theo giờ chuẩn Internet hiện tại
+    NSDate *currentDate = [NSDate dateWithTimeIntervalSince1970:get_current_real_time()];
+    NSString *dateStr = [formatter stringFromDate:currentDate];
     NSString *rawInput = [NSString stringWithFormat:@"%@%@_%@", deviceID, dateStr, SECRET_SALT];
 
     const char *cStr = [rawInput UTF8String];
@@ -287,7 +357,7 @@ static KeyAuthManager *sharedAuth = nil;
 
     NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
+    uint64_t now = get_current_real_time();
 
     if (savedKey && [savedKey isEqualToString:expectedKey] && now < expireTime) {
         [self.floatingButton setLockedState:NO];
@@ -299,24 +369,29 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (void)startHeartbeat {
     [self stopHeartbeat];
-    self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 
-                                                           target:self 
-                                                         selector:@selector(checkExpirationHeartbeat) 
-                                                         userInfo:nil 
-                                                          repeats:YES];
+    self.heartbeatSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(self.heartbeatSource, dispatch_walltime(NULL, 0), 1ull * NSEC_PER_SEC, 0);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.heartbeatSource, ^{
+        [weakSelf checkExpirationHeartbeat];
+    });
+    dispatch_resume(self.heartbeatSource);
 }
 
 - (void)stopHeartbeat {
-    [self.heartbeatTimer invalidate];
-    self.heartbeatTimer = nil;
+    if (self.heartbeatSource) {
+        dispatch_source_cancel(self.heartbeatSource);
+        self.heartbeatSource = nil;
+    }
 }
 
 - (void)checkExpirationHeartbeat {
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
+    uint64_t now = get_current_real_time();
 
     if (now >= expireTime) {
-        NSLog(@"[KeyAuth] License expired! Locking floating button and reverting speed...");
+        NSLog(@"[KeyAuth] License expired! Locking floating button...");
         [self lockSpeedhack];
     }
 }
@@ -361,29 +436,30 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *inputKey = alert.textFields.firstObject.text;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
-        if ([inputKey isEqualToString:expectedKey]) {
-            // Khi bật speedhack x5, thời gian trong app chạy nhanh gấp 5 lần.
-            // Vì vậy thời hạn test 120s đời thực tương đương với 120 * 5 = 600s trong app.
-            NSTimeInterval realDurationInGame = DURATION_TEST * SPEED_MULTIPLIER;
-            double expireTime = [[NSDate date] timeIntervalSince1970] + realDurationInGame;
+        // Đồng bộ lại giờ trước khi kích hoạt
+        sync_time_from_internet(^(BOOL success) {
+            NSString *freshExpectedKey = [self generateValidKeyForDevice:deviceID];
             
-            [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
-            [[NSUserDefaults standardUserDefaults] setDouble:expireTime forKey:EXPIRE_STORAGE];
-            [[NSUserDefaults standardUserDefaults] synchronize];
+            if ([inputKey isEqualToString:freshExpectedKey]) {
+                uint64_t expireTime = get_current_real_time() + DURATION_TEST;
+                [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
+                [[NSUserDefaults standardUserDefaults] setDouble:(double)expireTime forKey:EXPIRE_STORAGE];
+                [[NSUserDefaults standardUserDefaults] synchronize];
 
-            [self.floatingButton setLockedState:NO];
-            [self startHeartbeat];
-            
-            UIAlertController *success = [UIAlertController alertControllerWithTitle:@"Thành Công" message:@"Kích hoạt thành công!" preferredStyle:UIAlertControllerStyleAlert];
-            [success addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [rootVC presentViewController:success animated:YES completion:nil];
-        } else {
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Lỗi" message:@"Mã Key không chính xác hoặc đã hết hạn." preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
-                [self showKeyInputDialogOn:rootVC deviceID:deviceID expectedKey:expectedKey];
-            }]];
-            [rootVC presentViewController:err animated:YES completion:nil];
-        }
+                [self.floatingButton setLockedState:NO];
+                [self startHeartbeat];
+                
+                UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Thành Công" message:@"Kích hoạt thành công!" preferredStyle:UIAlertControllerStyleAlert];
+                [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [rootVC presentViewController:successAlert animated:YES completion:nil];
+            } else {
+                UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Lỗi" message:@"Mã Key không chính xác hoặc đã hết hạn." preferredStyle:UIAlertControllerStyleAlert];
+                [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+                    [self showKeyInputDialogOn:rootVC deviceID:deviceID expectedKey:freshExpectedKey];
+                }]];
+                [rootVC presentViewController:err animated:YES completion:nil];
+            }
+        });
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
