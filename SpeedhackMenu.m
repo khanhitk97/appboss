@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +16,13 @@ extern void set_speed_factor(float factor);
 #define DURATION_TEST (2 * 60) // 2 phút test (khi hoàn thiện đổi thành 24 * 60 * 60)
 #define SPEED_MULTIPLIER 5.0f
 
+// Lấy mốc thời gian thực trực tiếp từ xung nhịp phần cứng (Không bị bất kỳ hook nào can thiệp)
+static uint64_t get_hardware_raw_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (uint64_t)ts.tv_sec;
+}
+
 @protocol SpeedhackButtonDelegate <NSObject>
 - (void)onLongPressFiveSeconds;
 @end
@@ -23,7 +31,7 @@ extern void set_speed_factor(float factor);
 @property (nonatomic, assign) BOOL isSpeedOn;
 @property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
-@property (nonatomic, strong) NSTimer *countdownTimer;
+@property (nonatomic, strong) dispatch_source_t uiTimerSource; // Timer phần cứng độc lập
 @property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
 @end
 
@@ -58,7 +66,7 @@ extern void set_speed_factor(float factor);
 - (void)setLockedState:(BOOL)locked {
     _isLocked = locked;
     [self.idleTimer invalidate];
-    [self stopCountdown];
+    [self stopHardwareTimer];
     
     if (_isLocked) {
         set_speed_factor(1.0f);
@@ -75,16 +83,11 @@ extern void set_speed_factor(float factor);
     }
 }
 
-// Logic kiểm tra: Nếu BẬT (5X) thì CHIA 5; Nếu TẮT (1X) thì KHÔNG CHIA
+// Tính toán thời gian hoàn toàn từ đồng hồ phần cứng nguyên bản
 - (NSString *)formattedRemainingTime {
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
-    double diff = expireTime - now;
-
-    if (diff <= 0) return @"00:00";
-
-    // Bật 5x thì chia 5, tắt 1x thì giữ nguyên không chia
-    NSInteger remaining = _isSpeedOn ? (NSInteger)(diff / SPEED_MULTIPLIER) : (NSInteger)diff;
+    uint64_t now = get_hardware_raw_seconds();
+    NSInteger remaining = (NSInteger)(expireTime - now);
 
     if (remaining <= 0) return @"00:00";
 
@@ -99,32 +102,38 @@ extern void set_speed_factor(float factor);
     }
 }
 
-- (void)startCountdown {
-    [self stopCountdown];
+// Chạy Timer độc lập trên Main Dispatch Queue với chu kỳ đúng 1s phần cứng
+- (void)startHardwareTimer {
+    [self stopHardwareTimer];
     [self refreshButtonContent];
 
-    // Bật 5x thì chu kỳ timer là 0.2s; Nếu tắt 1x thì chu kỳ timer là 1.0s bình thường
-    NSTimeInterval interval = _isSpeedOn ? (1.0 / SPEED_MULTIPLIER) : 1.0;
+    self.uiTimerSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(self.uiTimerSource, dispatch_time(DISPATCH_TIME_NOW, 0), 1ull * NSEC_PER_SEC, 0);
 
-    self.countdownTimer = [NSTimer scheduledTimerWithTimeInterval:interval 
-                                                           target:self 
-                                                         selector:@selector(refreshButtonContent) 
-                                                         userInfo:nil 
-                                                          repeats:YES];
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.uiTimerSource, ^{
+        [weakSelf refreshButtonContent];
+    });
+    dispatch_resume(self.uiTimerSource);
 }
 
-- (void)stopCountdown {
-    [self.countdownTimer invalidate];
-    self.countdownTimer = nil;
+- (void)stopHardwareTimer {
+    if (self.uiTimerSource) {
+        dispatch_source_cancel(self.uiTimerSource);
+        self.uiTimerSource = nil;
+    }
 }
 
 - (void)refreshButtonContent {
-    if (_isLocked || !_isSpeedOn) {
-        [self stopCountdown];
+    if (_isLocked) {
+        [self stopHardwareTimer];
         return;
     }
-    NSString *timeStr = [self formattedRemainingTime];
-    [self setTitle:timeStr forState:UIControlStateNormal];
+
+    if (_isSpeedOn) {
+        NSString *timeStr = [self formattedRemainingTime];
+        [self setTitle:timeStr forState:UIControlStateNormal];
+    }
 }
 
 - (void)updateButtonUI {
@@ -133,9 +142,9 @@ extern void set_speed_factor(float factor);
     if (_isSpeedOn) {
         self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
         self.layer.borderColor = [UIColor whiteColor].CGColor;
-        [self startCountdown];
+        [self startHardwareTimer];
     } else {
-        [self stopCountdown];
+        [self stopHardwareTimer];
         self.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9];
         self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
         [self setTitle:@"TẮT" forState:UIControlStateNormal];
@@ -144,26 +153,9 @@ extern void set_speed_factor(float factor);
 
 - (void)toggleSpeed {
     if (_isLocked) return;
+    _isSpeedOn = !_isSpeedOn;
     
-    // Lưu lại số giây thực tế còn lại trước khi chuyển đổi tốc độ
-    double oldExpire = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
-    double diff = oldExpire - now;
-    
-    if (diff > 0) {
-        double realRemainingSeconds = _isSpeedOn ? (diff / SPEED_MULTIPLIER) : diff;
-        
-        // Đảo trạng thái
-        _isSpeedOn = !_isSpeedOn;
-        
-        // Quy đổi lại mốc expireTime mới tương ứng với tốc độ mới
-        double newDiff = _isSpeedOn ? (realRemainingSeconds * SPEED_MULTIPLIER) : realRemainingSeconds;
-        [[NSUserDefaults standardUserDefaults] setDouble:(now + newDiff) forKey:EXPIRE_STORAGE];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-    } else {
-        _isSpeedOn = !_isSpeedOn;
-    }
-
+    // Bật -> 5X, Tắt -> 1X
     set_speed_factor(_isSpeedOn ? SPEED_MULTIPLIER : 1.0f);
     [self updateButtonUI];
     [self resetIdleTimer];
@@ -231,7 +223,7 @@ extern void set_speed_factor(float factor);
 // ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
-@property (nonatomic, strong) NSTimer *heartbeatTimer;
+@property (nonatomic, strong) dispatch_source_t heartbeatSource;
 @property (nonatomic, weak) UIWindow *appWindow;
 @end
 
@@ -306,7 +298,7 @@ static KeyAuthManager *sharedAuth = nil;
 
     NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
+    uint64_t now = get_hardware_raw_seconds();
 
     if (savedKey && [savedKey isEqualToString:expectedKey] && now < expireTime) {
         [self.floatingButton setLockedState:NO];
@@ -318,24 +310,29 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (void)startHeartbeat {
     [self stopHeartbeat];
-    self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 
-                                                           target:self 
-                                                         selector:@selector(checkExpirationHeartbeat) 
-                                                         userInfo:nil 
-                                                          repeats:YES];
+    self.heartbeatSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(self.heartbeatSource, dispatch_time(DISPATCH_TIME_NOW, 0), 1ull * NSEC_PER_SEC, 0);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.heartbeatSource, ^{
+        [weakSelf checkExpirationHeartbeat];
+    });
+    dispatch_resume(self.heartbeatSource);
 }
 
 - (void)stopHeartbeat {
-    [self.heartbeatTimer invalidate];
-    self.heartbeatTimer = nil;
+    if (self.heartbeatSource) {
+        dispatch_source_cancel(self.heartbeatSource);
+        self.heartbeatSource = nil;
+    }
 }
 
 - (void)checkExpirationHeartbeat {
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    double now = [[NSDate date] timeIntervalSince1970];
+    uint64_t now = get_hardware_raw_seconds();
 
     if (now >= expireTime) {
-        NSLog(@"[KeyAuth] License expired! Locking floating button and reverting speed...");
+        NSLog(@"[KeyAuth] License expired! Locking floating button...");
         [self lockSpeedhack];
     }
 }
@@ -381,12 +378,10 @@ static KeyAuthManager *sharedAuth = nil;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
         if ([inputKey isEqualToString:expectedKey]) {
-            // Mặc định ban đầu bật lên là 5X nên quy đổi mốc theo 5X
-            NSTimeInterval realDurationInGame = DURATION_TEST * SPEED_MULTIPLIER;
-            double expireTime = [[NSDate date] timeIntervalSince1970] + realDurationInGame;
-            
+            // Mốc hết hạn lưu bằng đồng hồ phần cứng (Hardware Raw Clock)
+            uint64_t expireTime = get_hardware_raw_seconds() + DURATION_TEST;
             [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
-            [[NSUserDefaults standardUserDefaults] setDouble:expireTime forKey:EXPIRE_STORAGE];
+            [[NSUserDefaults standardUserDefaults] setDouble:(double)expireTime forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
             [self.floatingButton setLockedState:NO];
