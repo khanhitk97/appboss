@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,7 +58,7 @@ extern void set_speed_factor(float factor);
     [self.idleTimer invalidate];
     
     if (_isLocked) {
-        set_speed_factor(1.0f);
+        set_speed_factor(1.0f);[cite: 3, 4]
         _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
@@ -65,7 +66,7 @@ extern void set_speed_factor(float factor);
         self.alpha = 0.1;
     } else {
         _isSpeedOn = YES;
-        set_speed_factor(5.0f);
+        set_speed_factor(5.0f);[cite: 3, 4]
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -89,7 +90,7 @@ extern void set_speed_factor(float factor);
     if (_isLocked) return;
     _isSpeedOn = !_isSpeedOn;
     [self updateButtonUI];
-    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);
+    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);[cite: 3, 4]
     [self resetIdleTimer];
 }
 
@@ -194,13 +195,21 @@ static KeyAuthManager *sharedAuth = nil;
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 }
 
+// Hàm tính Key dùng hàm C tm/gmtime cố định GMT+7 (không bị lệch do lịch hay cài đặt máy)
 - (NSString *)generateValidKeyForDevice:(NSString *)deviceID {
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"ddMMyyyy"];
-    [formatter setTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Ho_Chi_Minh"]];
-    NSString *currentDateStr = [formatter stringFromDate:[NSDate date]];
+    time_t rawtime;
+    time(&rawtime);
+    rawtime += 7 * 3600; // GMT+7
+    struct tm *timeinfo = gmtime(&rawtime);
 
-    NSString *rawInput = [NSString stringWithFormat:@"%@%@_%@", deviceID, currentDateStr, SECRET_SALT];
+    int day = timeinfo->tm_mday;
+    int month = timeinfo->tm_mon + 1;
+    int year = timeinfo->tm_year + 1900;
+
+    // Luôn luôn ra định dạng 8 chữ số: ddMMyyyy (ví dụ: 12092026)
+    NSString *dateStr = [NSString stringWithFormat:@"%02d%02d%04d", day, month, year];
+    NSString *rawInput = [NSString stringWithFormat:@"%@%@_%@", deviceID, dateStr, SECRET_SALT];
+
     const char *cStr = [rawInput UTF8String];
     unsigned char digest[CC_MD5_DIGEST_LENGTH];
     CC_MD5(cStr, (CC_LONG)strlen(cStr), digest);
@@ -270,7 +279,7 @@ static KeyAuthManager *sharedAuth = nil;
     if (!rootVC) return;
 
     NSString *title = @"KÍCH HOẠT KEY (24H)";
-   NSString *msg = [NSString stringWithFormat:@"Mã máy: %@\nKey đúng của máy hiện tại:\n%@\n\n(Dán key này vào ô dưới)", deviceID, expectedKey];
+    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Sao chép mã gửi admin để nhận Key kích hoạt)", deviceID];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
 
