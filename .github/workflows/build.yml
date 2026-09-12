@@ -1,0 +1,47 @@
+name: Build Speedhack Dylib
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode Environment
+        run: sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+
+      - name: Compile Speedhack Dylib
+        run: |
+          mkdir -p build
+          xcrun -sdk iphoneos clang -dynamiclib -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -fobjc-arc \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreGraphics \
+            -framework CoreFoundation \
+            fishhook.c Speedhack.m SpeedhackMenu.m \
+            -o build/Speedhack.dylib
+
+      - name: Ad-hoc Code Sign
+        run: |
+          codesign -f -s - build/Speedhack.dylib
+
+      - name: Check Output File
+        run: |
+          ls -la build/
+          file build/Speedhack.dylib
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Speedhack-dylib
+          path: build/Speedhack.dylib
