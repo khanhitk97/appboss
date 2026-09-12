@@ -57,7 +57,7 @@ extern void set_speed_factor(float factor);
     [self.idleTimer invalidate];
     
     if (_isLocked) {
-        set_speed_factor(1.0f);[cite: 3, 4]
+        set_speed_factor(1.0f);
         _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
@@ -65,7 +65,7 @@ extern void set_speed_factor(float factor);
         self.alpha = 0.1;
     } else {
         _isSpeedOn = YES;
-        set_speed_factor(5.0f);[cite: 3, 4]
+        set_speed_factor(5.0f);
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -89,7 +89,7 @@ extern void set_speed_factor(float factor);
     if (_isLocked) return;
     _isSpeedOn = !_isSpeedOn;
     [self updateButtonUI];
-    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);[cite: 3, 4]
+    set_speed_factor(_isSpeedOn ? 5.0f : 1.0f);
     [self resetIdleTimer];
 }
 
@@ -185,7 +185,7 @@ static KeyAuthManager *sharedAuth = nil;
             }
         }
     }
-    return [UIApplication sharedApplication].keyWindow;
+    return [UIApplication sharedApplication].windows.firstObject;
 }
 
 - (NSString *)getDeviceID {
@@ -194,7 +194,6 @@ static KeyAuthManager *sharedAuth = nil;
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 }
 
-// Hàm tạo Key động theo ngày: MãMáy + ddMMyyyy + _SECRET_SALT_2026
 - (NSString *)generateValidKeyForDevice:(NSString *)deviceID {
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     [formatter setDateFormat:@"ddMMyyyy"];
@@ -230,7 +229,6 @@ static KeyAuthManager *sharedAuth = nil;
     NSTimeInterval expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 
-    // Kiểm tra: Key trùng khớp VÀ chưa quá 24h
     if (savedKey && [savedKey isEqualToString:expectedKey] && now < expireTime) {
         [self.floatingButton setLockedState:NO];
         
@@ -290,14 +288,12 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *inputKey = alert.textFields.firstObject.text;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
-        // So khớp key nhập vào với key tính toán trong ngày
         if ([inputKey isEqualToString:expectedKey]) {
             NSTimeInterval expireTime = [[NSDate date] timeIntervalSince1970] + DURATION_24H;
             [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
             [[NSUserDefaults standardUserDefaults] setDouble:expireTime forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
-            // Mở khóa nút nổi và bật tốc độ 5x
             [self.floatingButton setLockedState:NO];
 
             [self.expirationWatcherTimer invalidate];
