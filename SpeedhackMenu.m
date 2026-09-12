@@ -12,7 +12,7 @@ extern void set_speed_factor(float factor);
 #define KEY_STORAGE @"SAVED_SPEEDHACK_LICENSE_KEY"
 #define EXPIRE_STORAGE @"SPEEDHACK_EXPIRATION_TIME"
 #define SECRET_SALT @"SECRET_SALT_2026"
-#define DURATION_24H (24 * 60 * 60)
+#define DURATION_TEST (2 * 60) // Thời gian test 2 phút (đổi thành 24 * 60 * 60 khi thương mại)
 
 @protocol SpeedhackButtonDelegate <NSObject>
 - (void)onLongPressFiveSeconds;
@@ -22,6 +22,7 @@ extern void set_speed_factor(float factor);
 @property (nonatomic, assign) BOOL isSpeedOn;
 @property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
+@property (nonatomic, strong) NSTimer *countdownTimer;
 @property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
 @end
 
@@ -33,7 +34,9 @@ extern void set_speed_factor(float factor);
         self.layer.cornerRadius = frame.size.width / 2.0;
         self.layer.masksToBounds = YES;
         self.layer.borderWidth = 1.5;
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+        self.titleLabel.textAlignment = NSTextAlignmentCenter;
+        self.titleLabel.numberOfLines = 2; // Hiển thị 2 dòng: BẬT \n [thời gian]
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
@@ -55,6 +58,7 @@ extern void set_speed_factor(float factor);
 - (void)setLockedState:(BOOL)locked {
     _isLocked = locked;
     [self.idleTimer invalidate];
+    [self stopCountdown];
     
     if (_isLocked) {
         set_speed_factor(1.0f);
@@ -71,17 +75,67 @@ extern void set_speed_factor(float factor);
     }
 }
 
+// Logic rút gọn thời gian theo yêu cầu:
+// >= 1h: hiện Xh (ví dụ >2h là 2h, >1h là 1h)
+// < 1h: hiện Xp (ví dụ 59p)
+// < 1p: hiện Xs động (ví dụ 45s)
+- (NSString *)formattedRemainingTime {
+    NSTimeInterval expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSInteger remaining = (NSInteger)(expireTime - now);
+
+    if (remaining <= 0) return @"0s";
+
+    NSInteger hours = remaining / 3600;
+    NSInteger minutes = (remaining % 3600) / 60;
+    NSInteger seconds = remaining % 60;
+
+    if (hours >= 1) {
+        return [NSString stringWithFormat:@"%ldh", (long)hours];
+    } else if (minutes >= 1) {
+        return [NSString stringWithFormat:@"%ldp", (long)minutes];
+    } else {
+        return [NSString stringWithFormat:@"%lds", (long)seconds];
+    }
+}
+
+- (void)startCountdown {
+    [self.countdownTimer invalidate];
+    [self refreshButtonContent];
+    self.countdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 
+                                                           target:self 
+                                                         selector:@selector(refreshButtonContent) 
+                                                         userInfo:nil 
+                                                          repeats:YES];
+}
+
+- (void)stopCountdown {
+    [self.countdownTimer invalidate];
+    self.countdownTimer = nil;
+}
+
+- (void)refreshButtonContent {
+    if (_isLocked || !_isSpeedOn) {
+        [self stopCountdown];
+        return;
+    }
+    NSString *timeStr = [self formattedRemainingTime];
+    NSString *fullTitle = [NSString stringWithFormat:@"BẬT\n%@", timeStr];
+    [self setTitle:fullTitle forState:UIControlStateNormal];
+}
+
 - (void)updateButtonUI {
     if (_isLocked) return;
 
     if (_isSpeedOn) {
         self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
         self.layer.borderColor = [UIColor whiteColor].CGColor;
-        [self setTitle:@"5X" forState:UIControlStateNormal];
+        [self startCountdown];
     } else {
+        [self stopCountdown];
         self.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9];
         self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
-        [self setTitle:@"1X" forState:UIControlStateNormal];
+        [self setTitle:@"TẮT" forState:UIControlStateNormal];
     }
 }
 
@@ -217,7 +271,7 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (void)initialSetup {
     if (!self.floatingButton && self.appWindow) {
-        self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 50, 120, 42, 42)];
+        self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 54, 120, 46, 46)];
         self.floatingButton.delegate = self;
         [self.appWindow addSubview:self.floatingButton];
     }
@@ -236,7 +290,7 @@ static KeyAuthManager *sharedAuth = nil;
         [self.floatingButton setLockedState:NO];
         
         [self.expirationWatcherTimer invalidate];
-        self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
+        self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
     } else {
         [self lockSpeedhack];
     }
@@ -247,6 +301,7 @@ static KeyAuthManager *sharedAuth = nil;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 
     if (now >= expireTime) {
+        NSLog(@"[KeyAuth] License expired! Locking floating button and reverting speed...");
         [self lockSpeedhack];
     }
 }
@@ -271,8 +326,8 @@ static KeyAuthManager *sharedAuth = nil;
 - (void)showKeyInputDialogOn:(UIViewController *)rootVC deviceID:(NSString *)deviceID expectedKey:(NSString *)expectedKey {
     if (!rootVC) return;
 
-    NSString *title = @"KÍCH HOẠT BẢN QUYỀN (24H)";
-    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Sao chép mã máy gửi Admin để nhận Key kích hoạt)", deviceID];
+    NSString *title = @"KÍCH HOẠT BẢN QUYỀN";
+    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Nhấn giữ 5s để mở bảng này. Sao chép mã máy gửi Admin để nhận Key)", deviceID];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title 
                                                                    message:msg 
@@ -293,7 +348,7 @@ static KeyAuthManager *sharedAuth = nil;
         inputKey = [inputKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
         if ([inputKey isEqualToString:expectedKey]) {
-            NSTimeInterval expireTime = [[NSDate date] timeIntervalSince1970] + DURATION_24H;
+            NSTimeInterval expireTime = [[NSDate date] timeIntervalSince1970] + DURATION_TEST;
             [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
             [[NSUserDefaults standardUserDefaults] setDouble:expireTime forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
@@ -301,10 +356,10 @@ static KeyAuthManager *sharedAuth = nil;
             [self.floatingButton setLockedState:NO];
 
             [self.expirationWatcherTimer invalidate];
-            self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
+            self.expirationWatcherTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(checkExpirationHeartbeat) userInfo:nil repeats:YES];
             
-            UIAlertController *success = [UIAlertController alertControllerWithTitle:@"Thành Công" message:@"Kích hoạt bản quyền thành công! Speedhack đã sẵn sàng." preferredStyle:UIAlertControllerStyleAlert];
-            [success addAction:[UIAlertAction actionWithTitle:@"Bắt Đầu" style:UIAlertActionStyleDefault handler:nil]];
+            UIAlertController *success = [UIAlertController alertControllerWithTitle:@"Thành Công" message:@"Kích hoạt thành công!" preferredStyle:UIAlertControllerStyleAlert];
+            [success addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [rootVC presentViewController:success animated:YES completion:nil];
         } else {
             UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Lỗi" message:@"Mã Key không chính xác hoặc đã hết hạn." preferredStyle:UIAlertControllerStyleAlert];
