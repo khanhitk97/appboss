@@ -28,6 +28,7 @@ jobs:
             -framework UIKit \
             -framework CoreGraphics \
             -framework CoreFoundation \
+            -framework Security \
             fishhook.c Speedhack.m SpeedhackMenu.m \
             -o build/Speedhack.dylib
 
