@@ -16,7 +16,7 @@ extern void set_speed_factor(float factor);
 #define SPEED_MULTIPLIER 5.0f
 
 // ==========================================
-// ĐỒNG HỒ THỜI GIAN THỰC (INTERNET + HARDWARE)
+// ĐỒNG HỒ THỜI GIAN THỰC (INTERNET + MONOTONIC)
 // ==========================================
 static uint64_t get_raw_hardware_tick(void) {
     struct timespec ts;
@@ -77,7 +77,7 @@ static void sync_time_from_internet(void (^completion)(BOOL success)) {
 }
 
 // ==========================================
-// GIẢI MÃ VÀ TÍNH THỜI HẠN GÓI TỪ KEY
+// XÁC THỰC LICENSE KEY
 // ==========================================
 static uint64_t parse_duration_from_plan(NSString *planCode) {
     if (planCode.length < 2) return 0;
@@ -87,9 +87,9 @@ static uint64_t parse_duration_from_plan(NSString *planCode) {
     if (value <= 0) return 0;
 
     switch (unit) {
-        case 'M': return (uint64_t)value * 60;          // Phút (M02 = 120s)
-        case 'H': return (uint64_t)value * 3600;        // Giờ  (H02 = 7200s)
-        case 'D': return (uint64_t)value * 86400;       // Ngày (D07 = 7 ngày)
+        case 'M': return (uint64_t)value * 60;          // Phút
+        case 'H': return (uint64_t)value * 3600;        // Giờ
+        case 'D': return (uint64_t)value * 86400;       // Ngày
         default: return 0;
     }
 }
@@ -108,7 +108,7 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
     for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
         [hash appendFormat:@"%02X", digest[i]];
     }
-    return [hash substringToIndex:6]; // 6 ký tự chữ ký
+    return [hash substringToIndex:6];
 }
 
 // ==========================================
@@ -118,11 +118,13 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
 - (void)onOpenKeyDialog;
 @end
 
-@interface SpeedhackFloatingButton : UIButton
+@interface SpeedhackFloatingButton : UIButton <UIGestureRecognizerDelegate>
 @property (nonatomic, assign) BOOL isSpeedOn;
 @property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
 @property (nonatomic, strong) dispatch_source_t countdownSource;
+@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
+@property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
 @property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
 @end
 
@@ -136,13 +138,18 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
         self.layer.borderWidth = 1.5;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
-        
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self addGestureRecognizer:pan];
 
-        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        longPress.minimumPressDuration = 3.0;
-        [self addGestureRecognizer:longPress];
+        // Cử chỉ kéo thả
+        self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        self.panGesture.delegate = self;
+        [self addGestureRecognizer:self.panGesture];
+
+        // Cử chỉ nhấn giữ 5.0 giây
+        self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+        self.longPressGesture.minimumPressDuration = 5.0;
+        self.longPressGesture.allowableMovement = 15.0; // Cho phép xê dịch nhẹ ngón tay mà không bị hủy
+        self.longPressGesture.delegate = self;
+        [self addGestureRecognizer:self.longPressGesture];
 
         [self addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
 
@@ -154,18 +161,23 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
     return self;
 }
 
+// Cho phép cả Pan và LongPress cùng nhận diện mà không triệt tiêu nhau
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
 - (void)setLockedState:(BOOL)locked {
     _isLocked = locked;
     [self.idleTimer invalidate];
     [self stopCountdown];
-    
+
     if (_isLocked) {
         set_speed_factor(1.0f);
         _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
         [self setTitle:@"LOCK" forState:UIControlStateNormal];
-        self.alpha = 0.3;
+        self.alpha = 0.4;
     } else {
         _isSpeedOn = YES;
         set_speed_factor(SPEED_MULTIPLIER);
@@ -253,8 +265,14 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
     [self resetIdleTimer];
 }
 
+// Xử lý nhấn giữ đúng 5.0 giây
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        // Tạo hiệu ứng rung nhẹ báo hiệu đã giữ đủ 5 giây
+        if (@available(iOS 10.0, *)) {
+            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+            [feedback impactOccurred];
+        }
         if ([self.delegate respondsToSelector:@selector(onOpenKeyDialog)]) {
             [self.delegate onOpenKeyDialog];
         }
@@ -304,14 +322,14 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
 
 - (void)dimButton {
     [UIView animateWithDuration:0.5 animations:^{
-        self.alpha = 0.1;
+        self.alpha = 0.15;
     }];
 }
 
 @end
 
 // ==========================================
-// MANAGER XÁC THỰC BẢN QUYỀN
+// QUẢN LÝ BẢN QUYỀN (COMMERCIAL READY)
 // ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
@@ -446,19 +464,31 @@ static KeyAuthManager *sharedAuth = nil;
 - (void)showKeyInputDialogOn:(UIViewController *)rootVC deviceID:(NSString *)deviceID {
     if (!rootVC) return;
 
+    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
+    uint64_t now = get_current_real_time();
+    NSString *statusInfo = @"";
+
+    if (now < expireTime) {
+        NSInteger remainingSec = (NSInteger)(expireTime - now);
+        NSInteger days = remainingSec / 86400;
+        NSInteger hours = (remainingSec % 86400) / 3600;
+        NSInteger minutes = (remainingSec % 3600) / 60;
+        statusInfo = [NSString stringWithFormat:@"\nTrạng thái: Còn %ld ngày %ld giờ %ld phút\n(Nhập Key mới để gia hạn thêm)", (long)days, (long)hours, (long)minutes];
+    }
+
     NSString *title = @"KÍCH HOẠT BẢN QUYỀN";
-    NSString *msg = [NSString stringWithFormat:@"Mã máy của bạn:\n%@\n\n(Sao chép mã máy gửi Admin để nhận Key)", deviceID];
+    NSString *msg = [NSString stringWithFormat:@"Mã thiết bị của bạn:\n%@%@\n\n(Sao chép mã gửi Admin để nhận Key)", deviceID, statusInfo];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title 
                                                                    message:msg 
                                                             preferredStyle:UIAlertControllerStyleAlert];
 
     [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.placeholder = @"Nhập Key (VD: M02-XXXXXXXX-XXXXXX)";
+        textField.placeholder = @"Dán mã Key vào đây";
         textField.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
     }];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Copy Mã Máy" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Sao Chép Mã Máy" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         [UIPasteboard generalPasteboard].string = deviceID;
         [self showKeyInputDialogOn:rootVC deviceID:deviceID];
     }]];
@@ -467,74 +497,33 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *rawInput = alert.textFields.firstObject.text;
         NSString *inputKey = [rawInput stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
-        // 1. Kiểm tra cấu trúc phân tách 3 phần
-        NSArray *parts = [inputKey componentsSeparatedByString:@"-"];
-        if (parts.count != 3) {
-            NSString *debugMsg = [NSString stringWithFormat:
-                                  @"LỖI CẤU TRÚC KEY:\n"
-                                  @"- Key bạn nhập: [%@]\n"
-                                  @"- Số phần tách được: %lu (Yêu cầu phải đúng 3 phần: GÓI-MÁY-SIGN)",
-                                  inputKey, (unsigned long)parts.count];
-            
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Debug Lỗi Key" message:debugMsg preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+        uint64_t planDuration = 0;
+        if (![self validateKeyFormat:inputKey outPlanDuration:&planDuration]) {
+            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
+                                                                         message:@"Mã Key không chính xác hoặc không áp dụng cho thiết bị này!" 
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+            [err addAction:[UIAlertAction actionWithTitle:@"Nhập Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
                 [self showKeyInputDialogOn:rootVC deviceID:deviceID];
             }]];
             [rootVC presentViewController:err animated:YES completion:nil];
             return;
         }
 
-        NSString *planCode = parts[0];
-        NSString *keyDeviceID = parts[1];
-        NSString *receivedSign = parts[2];
-        NSString *myDeviceID = [self getDeviceID];
-
-        // 2. Tính toán chữ ký và thời lượng
-        NSString *expectedSign = generate_signature(planCode, myDeviceID);
-        uint64_t planDuration = parse_duration_from_plan(planCode);
-
-        // 3. So khớp chi tiết
-        BOOL isDeviceMatch = [keyDeviceID isEqualToString:myDeviceID];
-        BOOL isSignMatch = [receivedSign isEqualToString:expectedSign];
-        BOOL isDurationValid = (planDuration > 0);
-
-        if (!isDeviceMatch || !isSignMatch || !isDurationValid) {
-            NSString *rawHashInput = [NSString stringWithFormat:@"%@_%@_%@", planCode, myDeviceID, SECRET_SALT];
-            NSString *debugMsg = [NSString stringWithFormat:
-                                  @"CHI TIẾT SO SÁNH:\n\n"
-                                  @"1. Mã máy thực tế: [%@]\n"
-                                  @"   Mã máy trong Key: [%@]\n"
-                                  @"   -> Khớp máy: %@\n\n"
-                                  @"2. Gói thời gian: [%@] (%llu giây)\n"
-                                  @"   -> Hợp lệ: %@\n\n"
-                                  @"3. Chuỗi băm thô:\n[%@]\n\n"
-                                  @"   Chữ ký mong đợi:\n   [%@]\n\n"
-                                  @"   Chữ ký bạn nhập:\n   [%@]\n"
-                                  @"   -> Khớp chữ ký: %@",
-                                  myDeviceID, keyDeviceID, isDeviceMatch ? @"ĐÚNG" : @"SAI",
-                                  planCode, planDuration, isDurationValid ? @"ĐÚNG" : @"SAI",
-                                  rawHashInput, expectedSign, receivedSign, isSignMatch ? @"ĐÚNG" : @"SAI"];
-
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Debug Lỗi Xác Thực" message:debugMsg preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
-                [self showKeyInputDialogOn:rootVC deviceID:deviceID];
-            }]];
-            [rootVC presentViewController:err animated:YES completion:nil];
-            return;
-        }
-
-        // 4. Hợp lệ hoàn toàn -> Bắt đầu tính giờ
         sync_time_from_internet(^(BOOL success) {
-            uint64_t expireTime = get_current_real_time() + planDuration;
+            uint64_t currentExpire = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
+            uint64_t nowReal = get_current_real_time();
+            uint64_t baseTime = (nowReal < currentExpire) ? currentExpire : nowReal;
+            uint64_t newExpire = baseTime + planDuration;
+
             [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
-            [[NSUserDefaults standardUserDefaults] setDouble:(double)expireTime forKey:EXPIRE_STORAGE];
+            [[NSUserDefaults standardUserDefaults] setDouble:(double)newExpire forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
             [self.floatingButton setLockedState:NO];
             [self startHeartbeat];
-            
+
             UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Thành Công" 
-                                                                                  message:[NSString stringWithFormat:@"Kích hoạt gói %@ thành công!", planCode] 
+                                                                                  message:@"Kích hoạt bản quyền thành công!" 
                                                                            preferredStyle:UIAlertControllerStyleAlert];
             [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [rootVC presentViewController:successAlert animated:YES completion:nil];
