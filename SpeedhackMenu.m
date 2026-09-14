@@ -87,8 +87,8 @@ static uint64_t parse_duration_from_plan(NSString *planCode) {
     if (value <= 0) return 0;
 
     switch (unit) {
-        case 'M': return (uint64_t)value * 60;          // Phút (M03 = 180s)
-        case 'H': return (uint64_t)value * 3600;        // Giờ (H02 = 7200s)
+        case 'M': return (uint64_t)value * 60;          // Phút (M05 = 300s)
+        case 'H': return (uint64_t)value * 3600;        // Giờ  (H02 = 7200s)
         case 'D': return (uint64_t)value * 86400;       // Ngày (D07 = 7 ngày)
         default: return 0;
     }
@@ -424,7 +424,6 @@ static KeyAuthManager *sharedAuth = nil;
     uint64_t now = get_current_real_time();
 
     if (now >= expireTime) {
-        NSLog(@"[KeyAuth] License expired! Locking floating button...");
         [self lockSpeedhack];
     }
 }
@@ -468,16 +467,11 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *rawInput = alert.textFields.firstObject.text;
         NSString *inputKey = [rawInput stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
-        // 1. Kiểm tra cấu trúc phân tách dấu gạch ngang (-)
-        NSArray *parts = [inputKey componentsSeparatedByString:@"-"];
-        if (parts.count != 3) {
-            NSString *debugMsg = [NSString stringWithFormat:
-                                  @"LỖI CẤU TRÚC KEY:\n"
-                                  @"- Key bạn nhập: [%@]\n"
-                                  @"- Số phần tách được: %lu (Yêu cầu phải đúng 3 phần: GÓI-MÁY-SIGN)",
-                                  inputKey, (unsigned long)parts.count];
-            
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Debug Lỗi Key" message:debugMsg preferredStyle:UIAlertControllerStyleAlert];
+        uint64_t planDuration = 0;
+        if (![self validateKeyFormat:inputKey outPlanDuration:&planDuration]) {
+            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Lỗi Xác Thực" 
+                                                                         message:@"Mã Key không chính xác, sai mã máy hoặc đã bị chỉnh sửa." 
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
             [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
                 [self showKeyInputDialogOn:rootVC deviceID:deviceID];
             }]];
@@ -485,46 +479,6 @@ static KeyAuthManager *sharedAuth = nil;
             return;
         }
 
-        NSString *planCode = parts[0];
-        NSString *keyDeviceID = parts[1];
-        NSString *receivedSign = parts[2];
-        NSString *myDeviceID = [self getDeviceID];
-
-        // 2. Tính toán chữ ký kỳ vọng
-        NSString *expectedSign = generate_signature(planCode, myDeviceID);
-        uint64_t planDuration = parse_duration_from_plan(planCode);
-
-        // 3. So sánh chi tiết
-        BOOL isDeviceMatch = [keyDeviceID isEqualToString:myDeviceID];
-        BOOL isSignMatch = [receivedSign isEqualToString:expectedSign];
-        BOOL isDurationValid = (planDuration > 0);
-
-        if (!isDeviceMatch || !isSignMatch || !isDurationValid) {
-            NSString *rawHashInput = [NSString stringWithFormat:@"%@_%@_%@", planCode, myDeviceID, SECRET_SALT];
-            NSString *debugMsg = [NSString stringWithFormat:
-                                  @"CHI TIẾT SO SÁNH:\n\n"
-                                  @"1. Mã máy thực tế: [%@]\n"
-                                  @"   Mã máy trong Key: [%@]\n"
-                                  @"   -> Khớp máy: %@\n\n"
-                                  @"2. Gói thời gian: [%@] (%llu giây)\n"
-                                  @"   -> Hợp lệ: %@\n\n"
-                                  @"3. Chuỗi băm thô: [%@]\n"
-                                  @"   Chữ ký mong đợi: [%@]\n"
-                                  @"   Chữ ký bạn nhập: [%@]\n"
-                                  @"   -> Khớp chữ ký: %@",
-                                  myDeviceID, keyDeviceID, isDeviceMatch ? @"ĐÚNG" : @"SAI",
-                                  planCode, planDuration, isDurationValid ? @"ĐÚNG" : @"SAI",
-                                  rawHashInput, expectedSign, receivedSign, isSignMatch ? @"ĐÚNG" : @"SAI"];
-
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Debug Lỗi Xác Thực" message:debugMsg preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Thử Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
-                [self showKeyInputDialogOn:rootVC deviceID:deviceID];
-            }]];
-            [rootVC presentViewController:err animated:YES completion:nil];
-            return;
-        }
-
-        // 4. Nếu hợp lệ -> Đồng bộ thời gian và kích hoạt
         sync_time_from_internet(^(BOOL success) {
             uint64_t expireTime = get_current_real_time() + planDuration;
             [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
@@ -535,7 +489,7 @@ static KeyAuthManager *sharedAuth = nil;
             [self startHeartbeat];
             
             UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Thành Công" 
-                                                                                  message:[NSString stringWithFormat:@"Kích hoạt gói %@ thành công!", planCode] 
+                                                                                  message:@"Kích hoạt bản quyền thành công!" 
                                                                            preferredStyle:UIAlertControllerStyleAlert];
             [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [rootVC presentViewController:successAlert animated:YES completion:nil];
