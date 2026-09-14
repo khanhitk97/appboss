@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <Security/Security.h>
 #import <time.h>
 
 #ifdef __cplusplus
@@ -13,7 +14,68 @@ extern void set_speed_factor(float factor);
 #define KEY_STORAGE @"SAVED_SPEEDHACK_LICENSE_KEY"
 #define EXPIRE_STORAGE @"SPEEDHACK_EXPIRATION_TIME"
 #define SECRET_SALT @"SECRET_SALT_2026"
+#define KEYCHAIN_SERVICE @"com.speedhack.license.service"
+#define KEYCHAIN_ACCOUNT @"UsedNoncesHistory"
 #define SPEED_MULTIPLIER 5.0f
+
+// ==========================================
+// QUẢN LÝ LỊCH SỬ KEY TRÊN IOS KEYCHAIN
+// ==========================================
+static NSArray *get_used_nonces_from_keychain(void) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
+        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT,
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+    };
+
+    CFTypeRef dataTypeRef = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &dataTypeRef);
+    if (status == errSecSuccess) {
+        NSData *data = (__bridge_transfer NSData *)dataTypeRef;
+        NSError *err = nil;
+        NSArray *arr = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+        if (!err && [arr isKindOfClass:[NSArray class]]) {
+            return arr;
+        }
+    }
+    return @[];
+}
+
+static BOOL is_nonce_already_used(NSString *nonce) {
+    NSArray *usedList = get_used_nonces_from_keychain();
+    return [usedList containsObject:nonce];
+}
+
+static void save_nonce_to_keychain(NSString *nonce) {
+    NSMutableArray *usedList = [get_used_nonces_from_keychain() mutableCopy];
+    if (!usedList) usedList = [NSMutableArray array];
+    if (![usedList containsObject:nonce]) {
+        [usedList addObject:nonce];
+    }
+
+    NSData *data = [NSJSONSerialization dataWithJSONObject:usedList options:0 error:nil];
+    if (!data) return;
+
+    // Xóa record cũ nếu có để ghi đè
+    NSDictionary *deleteQuery = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
+        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT
+    };
+    SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+
+    // Thêm bản ghi mới
+    NSDictionary *addQuery = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
+        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT,
+        (__bridge id)kSecValueData: data,
+        (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlock
+    };
+    SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+}
 
 // ==========================================
 // ĐỒNG HỒ THỜI GIAN THỰC (INTERNET + MONOTONIC)
@@ -77,7 +139,7 @@ static void sync_time_from_internet(void (^completion)(BOOL success)) {
 }
 
 // ==========================================
-// XÁC THỰC LICENSE KEY
+// XÁC THỰC VÀ BÓC TÁCH GÓI TỪ KEY
 // ==========================================
 static uint64_t parse_duration_from_plan(NSString *planCode) {
     if (planCode.length < 2) return 0;
@@ -94,8 +156,9 @@ static uint64_t parse_duration_from_plan(NSString *planCode) {
     }
 }
 
-static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
-    NSString *raw = [NSString stringWithFormat:@"%@_%@_%@", planCode, deviceID, SECRET_SALT];
+// Chuỗi băm chuẩn: [GÓI]_[MÃ_MÁY]_[MÃ_LƯỢT]_[SALT]
+static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSString *nonce) {
+    NSString *raw = [NSString stringWithFormat:@"%@_%@_%@_%@", planCode, deviceID, nonce, SECRET_SALT];
     const char *cStr = [raw UTF8String];
     unsigned char digest[CC_MD5_DIGEST_LENGTH];
 
@@ -139,15 +202,13 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
         self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
 
-        // Cử chỉ kéo thả
         self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         self.panGesture.delegate = self;
         [self addGestureRecognizer:self.panGesture];
 
-        // Cử chỉ nhấn giữ 5.0 giây
         self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
         self.longPressGesture.minimumPressDuration = 5.0;
-        self.longPressGesture.allowableMovement = 15.0; // Cho phép xê dịch nhẹ ngón tay mà không bị hủy
+        self.longPressGesture.allowableMovement = 15.0;
         self.longPressGesture.delegate = self;
         [self addGestureRecognizer:self.longPressGesture];
 
@@ -161,7 +222,6 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
     return self;
 }
 
-// Cho phép cả Pan và LongPress cùng nhận diện mà không triệt tiêu nhau
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     return YES;
 }
@@ -265,10 +325,8 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
     [self resetIdleTimer];
 }
 
-// Xử lý nhấn giữ đúng 5.0 giây
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        // Tạo hiệu ứng rung nhẹ báo hiệu đã giữ đủ 5 giây
         if (@available(iOS 10.0, *)) {
             UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
             [feedback impactOccurred];
@@ -329,7 +387,7 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID) {
 @end
 
 // ==========================================
-// QUẢN LÝ BẢN QUYỀN (COMMERCIAL READY)
+// QUẢN LÝ BẢN QUYỀN (KEYCHAIN INTEGRATED)
 // ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
@@ -375,24 +433,26 @@ static KeyAuthManager *sharedAuth = nil;
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 }
 
-- (BOOL)validateKeyFormat:(NSString *)key outPlanDuration:(uint64_t *)outDuration {
+- (BOOL)validateKeyFormat:(NSString *)key outPlanDuration:(uint64_t *)outDuration outNonce:(NSString **)outNonce {
     NSArray *parts = [key componentsSeparatedByString:@"-"];
-    if (parts.count != 3) return NO;
+    if (parts.count != 4) return NO; // Yêu cầu đúng 4 khúc: GÓI-MÁY-NONCE-SIGN
 
     NSString *planCode = parts[0];
     NSString *keyDeviceID = parts[1];
-    NSString *receivedSign = parts[2];
+    NSString *nonce = parts[2];
+    NSString *receivedSign = parts[3];
 
     NSString *myDeviceID = [self getDeviceID];
     if (![keyDeviceID isEqualToString:myDeviceID]) return NO;
 
-    NSString *expectedSign = generate_signature(planCode, myDeviceID);
+    NSString *expectedSign = generate_signature(planCode, myDeviceID, nonce);
     if (![receivedSign isEqualToString:expectedSign]) return NO;
 
     uint64_t duration = parse_duration_from_plan(planCode);
     if (duration == 0) return NO;
 
     if (outDuration) *outDuration = duration;
+    if (outNonce) *outNonce = nonce;
     return YES;
 }
 
@@ -410,7 +470,7 @@ static KeyAuthManager *sharedAuth = nil;
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
     uint64_t now = get_current_real_time();
 
-    if (savedKey && [self validateKeyFormat:savedKey outPlanDuration:NULL] && now < expireTime) {
+    if (savedKey && [self validateKeyFormat:savedKey outPlanDuration:NULL outNonce:NULL] && now < expireTime) {
         [self.floatingButton setLockedState:NO];
         [self startHeartbeat];
     } else {
@@ -498,7 +558,10 @@ static KeyAuthManager *sharedAuth = nil;
         NSString *inputKey = [rawInput stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
 
         uint64_t planDuration = 0;
-        if (![self validateKeyFormat:inputKey outPlanDuration:&planDuration]) {
+        NSString *nonce = nil;
+
+        // 1. Kiểm tra tính hợp lệ về cấu trúc và chữ ký
+        if (![self validateKeyFormat:inputKey outPlanDuration:&planDuration outNonce:&nonce]) {
             UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
                                                                          message:@"Mã Key không chính xác hoặc không áp dụng cho thiết bị này!" 
                                                                   preferredStyle:UIAlertControllerStyleAlert];
@@ -509,7 +572,21 @@ static KeyAuthManager *sharedAuth = nil;
             return;
         }
 
+        // 2. Chống dùng lại Key cũ: Kiểm tra trong Keychain
+        if (is_nonce_already_used(nonce)) {
+            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
+                                                                         message:@"Mã Key này đã được kích hoạt trước đó và không thể tái sử dụng!" 
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+            [err addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+            [rootVC presentViewController:err animated:YES completion:nil];
+            return;
+        }
+
+        // 3. Hợp lệ hoàn toàn -> Lưu vào Keychain và cấp thời gian
         sync_time_from_internet(^(BOOL success) {
+            // Đánh dấu mã Nonce này đã dùng vào Keychain
+            save_nonce_to_keychain(nonce);
+
             uint64_t currentExpire = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
             uint64_t nowReal = get_current_real_time();
             uint64_t baseTime = (nowReal < currentExpire) ? currentExpire : nowReal;
@@ -523,7 +600,7 @@ static KeyAuthManager *sharedAuth = nil;
             [self startHeartbeat];
 
             UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Thành Công" 
-                                                                                  message:@"Kích hoạt bản quyền thành công!" 
+                                                                                  message:@"Bản quyền đã được kích hoạt thành công!" 
                                                                            preferredStyle:UIAlertControllerStyleAlert];
             [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [rootVC presentViewController:successAlert animated:YES completion:nil];
