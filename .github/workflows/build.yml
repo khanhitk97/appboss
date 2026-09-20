@@ -29,7 +29,7 @@ jobs:
             -framework CoreGraphics \
             -framework CoreFoundation \
             -framework Security \
-            fishhook.c Speedhack.m SpeedhackMenu.m \
+            fishhook.c Speedhack.m SpeedhackMenu.m SmartOrderTrigger.m \
             -o build/Speedhack.dylib
 
       - name: Ad-hoc Code Sign
