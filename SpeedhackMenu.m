@@ -170,13 +170,70 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
     return [hash substringToIndex:6];
 }
 
-// HÀM CHO FILE BẮT ĐƠN KIỂM TRA QUYỀN HOẠT ĐỘNG
+// Trạng thái cho phép bắt đơn
+static BOOL g_is_auto_enabled = YES;
+
 BOOL is_license_active(void) {
+    if (!g_is_auto_enabled) return NO;
     NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
     uint64_t now = get_current_real_time();
     return (savedKey != nil && expireTime > 0 && now < expireTime);
 }
+
+// ==========================================
+// VIEW CHỐNG CHỤP MÀN HÌNH (ANTI-SCREENSHOT)
+// ==========================================
+@interface SecureContainerView : UIView
+@property (nonatomic, strong) UITextField *secureTextField;
+@property (nonatomic, weak) UIView *contentView;
+@end
+
+@implementation SecureContainerView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.secureTextField = [[UITextField alloc] initWithFrame:self.bounds];
+        self.secureTextField.secureTextEntry = YES;
+        self.secureTextField.userInteractionEnabled = NO;
+        [self addSubview:self.secureTextField];
+
+        // Lấy lớp Canvas ẩn bên dưới của UITextField
+        UIView *canvasView = nil;
+        for (UIView *sub in self.secureTextField.subviews) {
+            if ([NSStringFromClass([sub class]) containsString:@"CanvasView"] ||
+                [NSStringFromClass([sub class]) containsString:@"TextEffects"]) {
+                canvasView = sub;
+                break;
+            }
+        }
+        if (!canvasView) {
+            canvasView = self.secureTextField.subviews.firstObject;
+        }
+
+        if (canvasView) {
+            canvasView.userInteractionEnabled = YES;
+            _contentView = canvasView;
+        } else {
+            _contentView = self;
+        }
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.secureTextField.frame = self.bounds;
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self || hit == self.secureTextField) return nil;
+    return hit;
+}
+
+@end
 
 // ==========================================
 // GIAO DIỆN NÚT NỔI (FLOATING BUTTON)
@@ -187,8 +244,8 @@ BOOL is_license_active(void) {
 
 @interface SpeedhackFloatingButton : UIButton <UIGestureRecognizerDelegate>
 @property (nonatomic, assign) BOOL isLocked;
+@property (nonatomic, assign) BOOL isAutoRunning;
 @property (nonatomic, strong) NSTimer *idleTimer;
-@property (nonatomic, strong) dispatch_source_t countdownSource;
 @property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
 @property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
 @property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
@@ -202,15 +259,16 @@ BOOL is_license_active(void) {
         self.layer.cornerRadius = frame.size.width / 2.0;
         self.layer.masksToBounds = YES;
         self.layer.borderWidth = 1.5;
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
 
         self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         self.panGesture.delegate = self;
         [self addGestureRecognizer:self.panGesture];
 
+        // Nhấn giữ 3 giây để mở bảng quản trị bản quyền
         self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        self.longPressGesture.minimumPressDuration = 5.0;
+        self.longPressGesture.minimumPressDuration = 3.0;
         self.longPressGesture.allowableMovement = 15.0;
         self.longPressGesture.delegate = self;
         [self addGestureRecognizer:self.longPressGesture];
@@ -218,7 +276,9 @@ BOOL is_license_active(void) {
         [self addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
 
         _isLocked = NO;
-        set_speed_factor(1.0f); // MẶC ĐỊNH LUÔN LÀ 1.0f
+        _isAutoRunning = YES;
+        set_speed_factor(1.0f);
+
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -232,78 +292,54 @@ BOOL is_license_active(void) {
 - (void)setLockedState:(BOOL)locked {
     _isLocked = locked;
     [self.idleTimer invalidate];
-    [self stopCountdown];
-
-    // Luôn giữ tốc độ mặc định x1.0, không tự ý bật x5
     set_speed_factor(1.0f);
 
     if (_isLocked) {
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
-        [self setTitle:@"LOCK" forState:UIControlStateNormal];
+        [self setTitle:@"🔒" forState:UIControlStateNormal];
         self.alpha = 0.4;
+    } else {
+        _isAutoRunning = YES;
+        g_is_auto_enabled = YES;
+        [self updateButtonUI];
+        [self resetIdleTimer];
+    }
+}
+
+// Báo hiệu khi đang bứt tốc x5 (Hiệu ứng Cam + Rung máy)
+- (void)showBurstEffect:(BOOL)isBursting {
+    if (_isLocked) return;
+
+    if (isBursting) {
+        [self bringToFullAlpha];
+        self.backgroundColor = [UIColor colorWithRed:1.0 green:0.5 blue:0.0 alpha:0.95]; // Màu cam rực
+        self.layer.borderColor = [UIColor whiteColor].CGColor;
+        [self setTitle:@"⚡" forState:UIControlStateNormal];
+
+        if (@available(iOS 10.0, *)) {
+            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+            [fb impactOccurred];
+        }
     } else {
         [self updateButtonUI];
         [self resetIdleTimer];
     }
 }
 
-- (NSString *)formattedRemainingTime {
-    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    uint64_t now = get_current_real_time();
-    NSInteger remaining = (NSInteger)(expireTime - now);
-
-    if (remaining <= 0) return @"00:00";
-
-    NSInteger days = remaining / 86400;
-    NSInteger hours = (remaining % 86400) / 3600;
-    NSInteger minutes = (remaining % 3600) / 60;
-    NSInteger seconds = remaining % 60;
-
-    if (days > 0) {
-        return [NSString stringWithFormat:@"%ldd %02ldh", (long)days, (long)hours];
-    } else if (hours > 0) {
-        return [NSString stringWithFormat:@"%02ld:%02ld:%02ld", (long)hours, (long)minutes, (long)seconds];
-    } else {
-        return [NSString stringWithFormat:@"%02ld:%02ld", (long)minutes, (long)seconds];
-    }
-}
-
-- (void)startCountdown {
-    [self stopCountdown];
-    [self refreshButtonContent];
-
-    self.countdownSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(self.countdownSource, dispatch_walltime(NULL, 0), 1ull * NSEC_PER_SEC, 0);
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_source_set_event_handler(self.countdownSource, ^{
-        [weakSelf refreshButtonContent];
-    });
-    dispatch_resume(self.countdownSource);
-}
-
-- (void)stopCountdown {
-    if (self.countdownSource) {
-        dispatch_source_cancel(self.countdownSource);
-        self.countdownSource = nil;
-    }
-}
-
-- (void)refreshButtonContent {
-    if (_isLocked) {
-        [self stopCountdown];
-        return;
-    }
-    NSString *timeStr = [self formattedRemainingTime];
-    [self setTitle:timeStr forState:UIControlStateNormal];
-}
-
 - (void)updateButtonUI {
     if (_isLocked) return;
-    self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
-    self.layer.borderColor = [UIColor whiteColor].CGColor;
-    [self startCountdown];
+
+    if (_isAutoRunning) {
+        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.75 blue:0.25 alpha:0.9]; // Xanh lá
+        self.layer.borderColor = [UIColor whiteColor].CGColor;
+        [self setTitle:@"⚡" forState:UIControlStateNormal];
+    } else {
+        self.backgroundColor = [UIColor colorWithWhite:0.4 alpha:0.85]; // Màu xám OFF
+        self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
+        [self setTitle:@"OFF" forState:UIControlStateNormal];
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+    }
 }
 
 - (void)handleTap {
@@ -313,6 +349,11 @@ BOOL is_license_active(void) {
         }
         return;
     }
+
+    // Chạm 1 chạm để Bật/Tắt chế độ Auto
+    _isAutoRunning = !_isAutoRunning;
+    g_is_auto_enabled = _isAutoRunning;
+    [self updateButtonUI];
     [self resetIdleTimer];
 }
 
@@ -329,10 +370,11 @@ BOOL is_license_active(void) {
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *superview = self.superview;
-    if (!superview) return;
+    UIView *container = self.superview.superview ?: self.superview;
+    UIView *targetView = self.superview; // Di chuyển cả khung chứa chống chụp
+    if (!targetView) return;
 
-    CGPoint translation = [pan translationInView:superview];
+    CGPoint translation = [pan translationInView:container];
 
     if (pan.state == UIGestureRecognizerStateBegan) {
         if (!_isLocked) {
@@ -340,15 +382,15 @@ BOOL is_license_active(void) {
             [self.idleTimer invalidate];
         }
     } else if (pan.state == UIGestureRecognizerStateChanged) {
-        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-        [pan setTranslation:CGPointZero inView:superview];
+        targetView.center = CGPointMake(targetView.center.x + translation.x, targetView.center.y + translation.y);
+        [pan setTranslation:CGPointZero inView:container];
     } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        CGFloat midX = superview.bounds.size.width / 2.0;
-        CGFloat targetX = (self.center.x < midX) ? (self.frame.size.width / 2.0 + 8) : (superview.bounds.size.width - self.frame.size.width / 2.0 - 8);
-        CGFloat targetY = MIN(MAX(self.center.y, 60), superview.bounds.size.height - 60);
+        CGFloat midX = container.bounds.size.width / 2.0;
+        CGFloat targetX = (targetView.center.x < midX) ? (targetView.frame.size.width / 2.0 + 8) : (container.bounds.size.width - targetView.frame.size.width / 2.0 - 8);
+        CGFloat targetY = MIN(MAX(targetView.center.y, 60), container.bounds.size.height - 60);
 
         [UIView animateWithDuration:0.25 animations:^{
-            self.center = CGPointMake(targetX, targetY);
+            targetView.center = CGPointMake(targetX, targetY);
         } completion:^(BOOL finished) {
             if (!_isLocked) [self resetIdleTimer];
         }];
@@ -371,7 +413,7 @@ BOOL is_license_active(void) {
 
 - (void)dimButton {
     [UIView animateWithDuration:0.5 animations:^{
-        self.alpha = 0.15;
+        self.alpha = 0.2;
     }];
 }
 
@@ -381,6 +423,7 @@ BOOL is_license_active(void) {
 // QUẢN LÝ BẢN QUYỀN
 // ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
+@property (nonatomic, strong) SecureContainerView *secureContainer;
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
 @property (nonatomic, strong) dispatch_source_t heartbeatSource;
 @property (nonatomic, weak) UIWindow *appWindow;
@@ -389,6 +432,10 @@ BOOL is_license_active(void) {
 @implementation KeyAuthManager
 
 static KeyAuthManager *sharedAuth = nil;
+
++ (instancetype)sharedInstance {
+    return sharedAuth;
+}
 
 + (void)load {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -449,9 +496,15 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (void)initialSetup {
     if (!self.floatingButton && self.appWindow) {
-        self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 54, 120, 46, 46)];
+        // Tạo khung chứa bảo mật chống chụp màn hình
+        self.secureContainer = [[SecureContainerView alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 54, 120, 46, 46)];
+        
+        self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:self.secureContainer.bounds];
         self.floatingButton.delegate = self;
-        [self.appWindow addSubview:self.floatingButton];
+
+        // Thêm nút vào canvas bảo vệ
+        [self.secureContainer.contentView addSubview:self.floatingButton];
+        [self.appWindow addSubview:self.secureContainer];
     }
     [self checkLicenseValidity];
 }
@@ -583,7 +636,6 @@ static KeyAuthManager *sharedAuth = nil;
             [[NSUserDefaults standardUserDefaults] setDouble:(double)newExpire forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
-            // Kích hoạt xong: Mở khóa nút, duy trì tốc độ x1.0
             [self.floatingButton setLockedState:NO];
             [self startHeartbeat];
 
@@ -600,4 +652,14 @@ static KeyAuthManager *sharedAuth = nil;
     [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
+// Hàm phụ để bên bắt đơn gọi đổi màu nút khi bứt tốc x5
+- (void)triggerButtonBurstEffect:(BOOL)active {
+    [self.floatingButton showBurstEffect:active];
+}
+
 @end
+
+// Hàm toàn cục cho SmartOrderTrigger.m gọi
+void notify_burst_state_to_button(BOOL active) {
+    [[KeyAuthManager sharedInstance] triggerButtonBurstEffect:active];
+}
