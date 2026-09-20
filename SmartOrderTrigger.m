@@ -9,20 +9,19 @@ extern void set_speed_factor(float factor);
 }
 #endif
 
-// Các hàm liên kết từ SpeedhackMenu.m
 extern BOOL is_license_active(void);
 extern void notify_burst_state_to_button(BOOL active);
 
 @interface SmartOrderDetector : NSObject
 @property (nonatomic, strong) dispatch_source_t scanTimer;
 @property (nonatomic, assign) BOOL isTriggered;
+@property (nonatomic, assign) BOOL isScanning;
 @end
 
 @implementation SmartOrderDetector
 
 + (void)load {
-    // Trì hoãn 2 giây sau khi app khởi động để đảm bảo UIWindow đã sẵn sàng
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[SmartOrderDetector sharedInstance] startMonitoring];
     });
 }
@@ -33,94 +32,97 @@ extern void notify_burst_state_to_button(BOOL active);
     dispatch_once(&onceToken, ^{
         instance = [[SmartOrderDetector alloc] init];
         instance.isTriggered = NO;
+        instance.isScanning = NO;
     });
     return instance;
 }
 
 - (void)startMonitoring {
-    // Quét nhẹ nhàng mỗi 200ms bằng GCD Timer trên Main Queue
+    // Tối ưu chu kỳ: Quét mỗi 400ms (0.4 giây) - đủ bắt số 3 mà không nghẽn CPU
     self.scanTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(self.scanTimer, dispatch_walltime(NULL, 0), 200ull * NSEC_PER_MSEC, 50ull * NSEC_PER_MSEC);
+    dispatch_source_set_timer(self.scanTimer, dispatch_walltime(NULL, 0), 400ull * NSEC_PER_MSEC, 100ull * NSEC_PER_MSEC);
 
     __weak typeof(self) weakSelf = self;
     dispatch_source_set_event_handler(self.scanTimer, ^{
-        [weakSelf scanCurrentScreen];
+        [weakSelf scanCurrentScreenFast];
     });
     dispatch_resume(self.scanTimer);
 }
 
-- (void)scanCurrentScreen {
-    // 1. Kiểm tra bản quyền: Chưa kích hoạt hoặc hết hạn thì bỏ qua
+- (void)scanCurrentScreenFast {
     if (!is_license_active()) return;
+    if (self.isScanning) return; // Chống chồng chéo chu kỳ quét nếu frame trước chưa xử lý xong
+    self.isScanning = YES;
 
     UIWindow *window = [UIApplication sharedApplication].keyWindow;
-    if (!window) return;
+    if (!window) {
+        self.isScanning = NO;
+        return;
+    }
 
     BOOL foundSecond3 = NO;
     BOOL foundOrderScreen = NO;
 
-    [self searchViews:window found3:&foundSecond3 foundOrder:&foundOrderScreen];
+    // Quét có giới hạn độ sâu (maxDepth = 8) để không đơ luồng giao diện
+    [self fastSearch:window currentDepth:0 maxDepth:8 found3:&foundSecond3 foundOrder:&foundOrderScreen];
 
-    // 2. PHÁT HIỆN MỐC GIÂY THỨ 3
+    // PHÁT HIỆN MỐC GIÂY THỨ 3
     if (foundSecond3 && !self.isTriggered) {
         self.isTriggered = YES;
 
-        // Bật phản hồi trực quan trên nút Menu (chớp Cam + rung máy)
         notify_burst_state_to_button(YES);
-
-        // Kích hoạt bứt tốc x5.0
         set_speed_factor(5.0f);
 
-        // Chạy đúng 1.0 giây rồi trả về nhịp x1.0 an toàn
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             set_speed_factor(1.0f);
-            notify_burst_state_to_button(NO); // Nút trở về màu xanh ⚡
+            notify_burst_state_to_button(NO);
         });
     }
 
-    // 3. Khi chuỗi đếm ngược biến mất (hoặc thoát popup đơn hàng) -> Reset cờ để đón đơn mới
     if (!foundOrderScreen) {
         self.isTriggered = NO;
     }
+
+    self.isScanning = NO;
 }
 
-- (void)searchViews:(UIView *)view found3:(BOOL *)found3 foundOrder:(BOOL *)foundOrder {
-    if (!view || view.isHidden || view.alpha < 0.1) return;
+- (void)fastSearch:(UIView *)view currentDepth:(NSInteger)depth maxDepth:(NSInteger)maxDepth found3:(BOOL *)found3 foundOrder:(BOOL *)foundOrder {
+    if (!view || view.isHidden || view.alpha < 0.1 || depth > maxDepth) return;
 
-    // Quét text trên các thành phần UILabel gốc của iOS
+    // 1. Kiểm tra nhanh UILabel
     if ([view isKindOfClass:[UILabel class]]) {
         NSString *txt = [(UILabel *)view text];
-        if (txt.length > 0) {
+        if (txt.length > 5) { // Bỏ qua text quá ngắn không liên quan
             if ([txt containsString:@"được nhận đơn sau"]) {
                 *foundOrder = YES;
-                if ([txt containsString:@"sau 3 giây"] || [txt containsString:@"3 giây"]) {
+                if ([txt containsString:@"3 giây"] || [txt containsString:@"sau 3"]) {
                     *found3 = YES;
+                    return;
                 }
+            } else if ([txt containsString:@"Vuốt để nhận đơn"]) {
+                *foundOrder = YES;
             }
-            if ([txt containsString:@"Vuốt để nhận đơn"]) {
+        }
+    } else {
+        // 2. Kiểm tra nhanh React Native accessibility
+        NSString *acc = view.accessibilityLabel;
+        if (acc.length > 5) {
+            if ([acc containsString:@"được nhận đơn sau"]) {
+                *foundOrder = YES;
+                if ([acc containsString:@"3 giây"] || [acc containsString:@"sau 3"]) {
+                    *found3 = YES;
+                    return;
+                }
+            } else if ([acc containsString:@"Vuốt để nhận đơn"]) {
                 *foundOrder = YES;
             }
         }
     }
 
-    // Quét thuộc tính Accessibility Text của React Native (RCTTextView / RCTParagraphComponentView)
-    NSString *acc = view.accessibilityLabel;
-    if (acc.length > 0) {
-        if ([acc containsString:@"được nhận đơn sau"]) {
-            *foundOrder = YES;
-            if ([acc containsString:@"sau 3 giây"] || [acc containsString:@"3 giây"]) {
-                *found3 = YES;
-            }
-        }
-        if ([acc containsString:@"Vuốt để nhận đơn"]) {
-            *foundOrder = YES;
-        }
-    }
-
-    // Đệ quy duyệt qua các view con
-    for (UIView *sub in view.subviews) {
-        [self searchViews:sub found3:found3 foundOrder:foundOrder];
-        if (*found3) break; // Đã tìm thấy mốc 3s thì dừng quét nhánh con này
+    // Đệ quy có kiểm soát - ưu tiên các view con từ dưới lên (nơi thường chứa popup/modal)
+    for (UIView *sub in [view.subviews reverseObjectEnumerator]) {
+        [self fastSearch:sub currentDepth:depth + 1 maxDepth:maxDepth found3:found3 foundOrder:foundOrder];
+        if (*found3) break;
     }
 }
 
