@@ -16,7 +16,6 @@ extern void set_speed_factor(float factor);
 #define SECRET_SALT @"SECRET_SALT_2026"
 #define KEYCHAIN_SERVICE @"com.speedhack.license.service"
 #define KEYCHAIN_ACCOUNT @"UsedNoncesHistory"
-#define SPEED_MULTIPLIER 5.0f
 
 // ==========================================
 // QUẢN LÝ LỊCH SỬ KEY TRÊN IOS KEYCHAIN
@@ -171,7 +170,7 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
     return [hash substringToIndex:6];
 }
 
-// HÀM CHO FILE BẮT ĐƠN KIỂM TRA BẢN QUYỀN
+// HÀM CHO FILE BẮT ĐƠN KIỂM TRA QUYỀN HOẠT ĐỘNG
 BOOL is_license_active(void) {
     NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
     double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
@@ -219,6 +218,7 @@ BOOL is_license_active(void) {
         [self addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
 
         _isLocked = NO;
+        set_speed_factor(1.0f); // MẶC ĐỊNH LUÔN LÀ 1.0f
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -234,8 +234,10 @@ BOOL is_license_active(void) {
     [self.idleTimer invalidate];
     [self stopCountdown];
 
+    // Luôn giữ tốc độ mặc định x1.0, không tự ý bật x5
+    set_speed_factor(1.0f);
+
     if (_isLocked) {
-        set_speed_factor(1.0f);
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
         [self setTitle:@"LOCK" forState:UIControlStateNormal];
@@ -311,7 +313,6 @@ BOOL is_license_active(void) {
         }
         return;
     }
-    // Trạng thái đã kích hoạt: Nút hiển thị thời hạn còn lại và sẵn sàng chờ sự kiện đơn
     [self resetIdleTimer];
 }
 
@@ -582,6 +583,7 @@ static KeyAuthManager *sharedAuth = nil;
             [[NSUserDefaults standardUserDefaults] setDouble:(double)newExpire forKey:EXPIRE_STORAGE];
             [[NSUserDefaults standardUserDefaults] synchronize];
 
+            // Kích hoạt xong: Mở khóa nút, duy trì tốc độ x1.0
             [self.floatingButton setLockedState:NO];
             [self startHeartbeat];
 
