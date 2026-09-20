@@ -58,7 +58,6 @@ static void save_nonce_to_keychain(NSString *nonce) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:usedList options:0 error:nil];
     if (!data) return;
 
-    // Xóa record cũ nếu có để ghi đè
     NSDictionary *deleteQuery = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
@@ -66,7 +65,6 @@ static void save_nonce_to_keychain(NSString *nonce) {
     };
     SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
 
-    // Thêm bản ghi mới
     NSDictionary *addQuery = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
@@ -89,7 +87,7 @@ static uint64_t get_raw_hardware_tick(void) {
 static int64_t g_network_time_offset = 0;
 static BOOL g_has_synced_network_time = NO;
 
-static uint64_t get_current_real_time(void) {
+uint64_t get_current_real_time(void) {
     if (!g_has_synced_network_time) {
         return (uint64_t)[[NSDate date] timeIntervalSince1970];
     }
@@ -149,14 +147,13 @@ static uint64_t parse_duration_from_plan(NSString *planCode) {
     if (value <= 0) return 0;
 
     switch (unit) {
-        case 'M': return (uint64_t)value * 60;          // Phút
-        case 'H': return (uint64_t)value * 3600;        // Giờ
-        case 'D': return (uint64_t)value * 86400;       // Ngày
+        case 'M': return (uint64_t)value * 60;
+        case 'H': return (uint64_t)value * 3600;
+        case 'D': return (uint64_t)value * 86400;
         default: return 0;
     }
 }
 
-// Chuỗi băm chuẩn: [GÓI]_[MÃ_MÁY]_[MÃ_LƯỢT]_[SALT]
 static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSString *nonce) {
     NSString *raw = [NSString stringWithFormat:@"%@_%@_%@_%@", planCode, deviceID, nonce, SECRET_SALT];
     const char *cStr = [raw UTF8String];
@@ -174,6 +171,14 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
     return [hash substringToIndex:6];
 }
 
+// HÀM CHO FILE BẮT ĐƠN KIỂM TRA BẢN QUYỀN
+BOOL is_license_active(void) {
+    NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
+    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
+    uint64_t now = get_current_real_time();
+    return (savedKey != nil && expireTime > 0 && now < expireTime);
+}
+
 // ==========================================
 // GIAO DIỆN NÚT NỔI (FLOATING BUTTON)
 // ==========================================
@@ -182,7 +187,6 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
 @end
 
 @interface SpeedhackFloatingButton : UIButton <UIGestureRecognizerDelegate>
-@property (nonatomic, assign) BOOL isSpeedOn;
 @property (nonatomic, assign) BOOL isLocked;
 @property (nonatomic, strong) NSTimer *idleTimer;
 @property (nonatomic, strong) dispatch_source_t countdownSource;
@@ -214,7 +218,6 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
 
         [self addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
 
-        _isSpeedOn = YES;
         _isLocked = NO;
         [self updateButtonUI];
         [self resetIdleTimer];
@@ -233,14 +236,11 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
 
     if (_isLocked) {
         set_speed_factor(1.0f);
-        _isSpeedOn = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
         self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
         [self setTitle:@"LOCK" forState:UIControlStateNormal];
         self.alpha = 0.4;
     } else {
-        _isSpeedOn = YES;
-        set_speed_factor(SPEED_MULTIPLIER);
         [self updateButtonUI];
         [self resetIdleTimer];
     }
@@ -289,7 +289,7 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
 }
 
 - (void)refreshButtonContent {
-    if (_isLocked || !_isSpeedOn) {
+    if (_isLocked) {
         [self stopCountdown];
         return;
     }
@@ -299,17 +299,9 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
 
 - (void)updateButtonUI {
     if (_isLocked) return;
-
-    if (_isSpeedOn) {
-        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
-        self.layer.borderColor = [UIColor whiteColor].CGColor;
-        [self startCountdown];
-    } else {
-        [self stopCountdown];
-        self.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9];
-        self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
-        [self setTitle:@"TẮT" forState:UIControlStateNormal];
-    }
+    self.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.9];
+    self.layer.borderColor = [UIColor whiteColor].CGColor;
+    [self startCountdown];
 }
 
 - (void)handleTap {
@@ -319,9 +311,7 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
         }
         return;
     }
-    _isSpeedOn = !_isSpeedOn;
-    set_speed_factor(_isSpeedOn ? SPEED_MULTIPLIER : 1.0f);
-    [self updateButtonUI];
+    // Trạng thái đã kích hoạt: Nút hiển thị thời hạn còn lại và sẵn sàng chờ sự kiện đơn
     [self resetIdleTimer];
 }
 
@@ -387,7 +377,7 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
 @end
 
 // ==========================================
-// QUẢN LÝ BẢN QUYỀN (KEYCHAIN INTEGRATED)
+// QUẢN LÝ BẢN QUYỀN
 // ==========================================
 @interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
 @property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
@@ -435,7 +425,7 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (BOOL)validateKeyFormat:(NSString *)key outPlanDuration:(uint64_t *)outDuration outNonce:(NSString **)outNonce {
     NSArray *parts = [key componentsSeparatedByString:@"-"];
-    if (parts.count != 4) return NO; // Yêu cầu đúng 4 khúc: GÓI-MÁY-NONCE-SIGN
+    if (parts.count != 4) return NO;
 
     NSString *planCode = parts[0];
     NSString *keyDeviceID = parts[1];
@@ -560,7 +550,6 @@ static KeyAuthManager *sharedAuth = nil;
         uint64_t planDuration = 0;
         NSString *nonce = nil;
 
-        // 1. Kiểm tra tính hợp lệ về cấu trúc và chữ ký
         if (![self validateKeyFormat:inputKey outPlanDuration:&planDuration outNonce:&nonce]) {
             UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
                                                                          message:@"Mã Key không chính xác hoặc không áp dụng cho thiết bị này!" 
@@ -572,7 +561,6 @@ static KeyAuthManager *sharedAuth = nil;
             return;
         }
 
-        // 2. Chống dùng lại Key cũ: Kiểm tra trong Keychain
         if (is_nonce_already_used(nonce)) {
             UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
                                                                          message:@"Mã Key này đã được kích hoạt trước đó và không thể tái sử dụng!" 
@@ -582,9 +570,7 @@ static KeyAuthManager *sharedAuth = nil;
             return;
         }
 
-        // 3. Hợp lệ hoàn toàn -> Lưu vào Keychain và cấp thời gian
         sync_time_from_internet(^(BOOL success) {
-            // Đánh dấu mã Nonce này đã dùng vào Keychain
             save_nonce_to_keychain(nonce);
 
             uint64_t currentExpire = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
