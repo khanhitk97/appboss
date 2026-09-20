@@ -170,7 +170,6 @@ static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSSt
     return [hash substringToIndex:6];
 }
 
-// Trạng thái cho phép bắt đơn
 static BOOL g_is_auto_enabled = YES;
 
 BOOL is_license_active(void) {
@@ -182,11 +181,11 @@ BOOL is_license_active(void) {
 }
 
 // ==========================================
-// VIEW CHỐNG CHỤP MÀN HÌNH (ANTI-SCREENSHOT)
+// VIEW CHỐNG CHỤP MÀN HÌNH (CHUẨN HÓA CẢM ỨNG)
 // ==========================================
 @interface SecureContainerView : UIView
 @property (nonatomic, strong) UITextField *secureTextField;
-@property (nonatomic, weak) UIView *contentView;
+@property (nonatomic, weak) UIView *canvasContainer;
 @end
 
 @implementation SecureContainerView
@@ -194,29 +193,34 @@ BOOL is_license_active(void) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
+        self.backgroundColor = [UIColor clearColor];
+        self.clipsToBounds = NO;
+        self.userInteractionEnabled = YES;
+
         self.secureTextField = [[UITextField alloc] initWithFrame:self.bounds];
         self.secureTextField.secureTextEntry = YES;
-        self.secureTextField.userInteractionEnabled = NO;
+        self.secureTextField.backgroundColor = [UIColor clearColor];
+        self.secureTextField.userInteractionEnabled = YES;
         [self addSubview:self.secureTextField];
 
-        // Lấy lớp Canvas ẩn bên dưới của UITextField
-        UIView *canvasView = nil;
+        // Lấy lớp Canvas ẩn bên dưới UITextField
+        UIView *canvas = nil;
         for (UIView *sub in self.secureTextField.subviews) {
             if ([NSStringFromClass([sub class]) containsString:@"CanvasView"] ||
                 [NSStringFromClass([sub class]) containsString:@"TextEffects"]) {
-                canvasView = sub;
+                canvas = sub;
                 break;
             }
         }
-        if (!canvasView) {
-            canvasView = self.secureTextField.subviews.firstObject;
+        if (!canvas && self.secureTextField.subviews.count > 0) {
+            canvas = self.secureTextField.subviews.firstObject;
         }
 
-        if (canvasView) {
-            canvasView.userInteractionEnabled = YES;
-            _contentView = canvasView;
+        if (canvas) {
+            canvas.userInteractionEnabled = YES;
+            _canvasContainer = canvas;
         } else {
-            _contentView = self;
+            _canvasContainer = self;
         }
     }
     return self;
@@ -225,12 +229,30 @@ BOOL is_license_active(void) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     self.secureTextField.frame = self.bounds;
+    if (self.canvasContainer && self.canvasContainer != self) {
+        self.canvasContainer.frame = self.bounds;
+    }
 }
 
+// Truyền chuẩn xác mọi thao tác chạm/kéo/nhấn tới view con
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self || hit == self.secureTextField) return nil;
-    return hit;
+    if (self.hidden || self.alpha < 0.01 || !self.userInteractionEnabled) {
+        return nil;
+    }
+    
+    if ([self pointInside:point withEvent:event]) {
+        for (UIView *subview in [self.canvasContainer.subviews reverseObjectEnumerator]) {
+            if (!subview.hidden && subview.alpha > 0.01 && subview.userInteractionEnabled) {
+                CGPoint subPoint = [subview convertPoint:point fromView:self];
+                UIView *hit = [subview hitTest:subPoint withEvent:event];
+                if (hit) return hit;
+            }
+        }
+        if (self.canvasContainer.subviews.count > 0) {
+            return self.canvasContainer.subviews.firstObject;
+        }
+    }
+    return nil;
 }
 
 @end
@@ -261,12 +283,13 @@ BOOL is_license_active(void) {
         self.layer.borderWidth = 1.5;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
+        self.userInteractionEnabled = YES;
 
         self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         self.panGesture.delegate = self;
         [self addGestureRecognizer:self.panGesture];
 
-        // Nhấn giữ 3 giây để mở bảng quản trị bản quyền
+        // Nhấn giữ 3.0 giây để mở bảng bản quyền
         self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
         self.longPressGesture.minimumPressDuration = 3.0;
         self.longPressGesture.allowableMovement = 15.0;
@@ -307,13 +330,12 @@ BOOL is_license_active(void) {
     }
 }
 
-// Báo hiệu khi đang bứt tốc x5 (Hiệu ứng Cam + Rung máy)
 - (void)showBurstEffect:(BOOL)isBursting {
     if (_isLocked) return;
 
     if (isBursting) {
         [self bringToFullAlpha];
-        self.backgroundColor = [UIColor colorWithRed:1.0 green:0.5 blue:0.0 alpha:0.95]; // Màu cam rực
+        self.backgroundColor = [UIColor colorWithRed:1.0 green:0.5 blue:0.0 alpha:0.95]; // Màu cam
         self.layer.borderColor = [UIColor whiteColor].CGColor;
         [self setTitle:@"⚡" forState:UIControlStateNormal];
 
@@ -334,8 +356,9 @@ BOOL is_license_active(void) {
         self.backgroundColor = [UIColor colorWithRed:0.1 green:0.75 blue:0.25 alpha:0.9]; // Xanh lá
         self.layer.borderColor = [UIColor whiteColor].CGColor;
         [self setTitle:@"⚡" forState:UIControlStateNormal];
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
     } else {
-        self.backgroundColor = [UIColor colorWithWhite:0.4 alpha:0.85]; // Màu xám OFF
+        self.backgroundColor = [UIColor colorWithWhite:0.4 alpha:0.85]; // Xám tắt
         self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
         [self setTitle:@"OFF" forState:UIControlStateNormal];
         self.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
@@ -350,7 +373,6 @@ BOOL is_license_active(void) {
         return;
     }
 
-    // Chạm 1 chạm để Bật/Tắt chế độ Auto
     _isAutoRunning = !_isAutoRunning;
     g_is_auto_enabled = _isAutoRunning;
     [self updateButtonUI];
@@ -370,11 +392,16 @@ BOOL is_license_active(void) {
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *container = self.superview.superview ?: self.superview;
-    UIView *targetView = self.superview; // Di chuyển cả khung chứa chống chụp
-    if (!targetView) return;
+    UIView *targetContainer = self.superview;
+    while (targetContainer && ![targetContainer isKindOfClass:[SecureContainerView class]]) {
+        targetContainer = targetContainer.superview;
+    }
+    if (!targetContainer) targetContainer = self;
 
-    CGPoint translation = [pan translationInView:container];
+    UIView *window = targetContainer.superview;
+    if (!window) return;
+
+    CGPoint translation = [pan translationInView:window];
 
     if (pan.state == UIGestureRecognizerStateBegan) {
         if (!_isLocked) {
@@ -382,15 +409,15 @@ BOOL is_license_active(void) {
             [self.idleTimer invalidate];
         }
     } else if (pan.state == UIGestureRecognizerStateChanged) {
-        targetView.center = CGPointMake(targetView.center.x + translation.x, targetView.center.y + translation.y);
-        [pan setTranslation:CGPointZero inView:container];
+        targetContainer.center = CGPointMake(targetContainer.center.x + translation.x, targetContainer.center.y + translation.y);
+        [pan setTranslation:CGPointZero inView:window];
     } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        CGFloat midX = container.bounds.size.width / 2.0;
-        CGFloat targetX = (targetView.center.x < midX) ? (targetView.frame.size.width / 2.0 + 8) : (container.bounds.size.width - targetView.frame.size.width / 2.0 - 8);
-        CGFloat targetY = MIN(MAX(targetView.center.y, 60), container.bounds.size.height - 60);
+        CGFloat midX = window.bounds.size.width / 2.0;
+        CGFloat targetX = (targetContainer.center.x < midX) ? (targetContainer.frame.size.width / 2.0 + 8) : (window.bounds.size.width - targetContainer.frame.size.width / 2.0 - 8);
+        CGFloat targetY = MIN(MAX(targetContainer.center.y, 60), window.bounds.size.height - 60);
 
         [UIView animateWithDuration:0.25 animations:^{
-            targetView.center = CGPointMake(targetX, targetY);
+            targetContainer.center = CGPointMake(targetX, targetY);
         } completion:^(BOOL finished) {
             if (!_isLocked) [self resetIdleTimer];
         }];
@@ -496,15 +523,16 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (void)initialSetup {
     if (!self.floatingButton && self.appWindow) {
-        // Tạo khung chứa bảo mật chống chụp màn hình
+        // Khởi tạo container bảo mật chống chụp màn hình
         self.secureContainer = [[SecureContainerView alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 54, 120, 46, 46)];
         
         self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:self.secureContainer.bounds];
         self.floatingButton.delegate = self;
+        self.floatingButton.userInteractionEnabled = YES;
 
-        // Thêm nút vào canvas bảo vệ
-        [self.secureContainer.contentView addSubview:self.floatingButton];
+        [self.secureContainer.canvasContainer addSubview:self.floatingButton];
         [self.appWindow addSubview:self.secureContainer];
+        [self.appWindow bringSubviewToFront:self.secureContainer];
     }
     [self checkLicenseValidity];
 }
@@ -652,14 +680,12 @@ static KeyAuthManager *sharedAuth = nil;
     [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
-// Hàm phụ để bên bắt đơn gọi đổi màu nút khi bứt tốc x5
 - (void)triggerButtonBurstEffect:(BOOL)active {
     [self.floatingButton showBurstEffect:active];
 }
 
 @end
 
-// Hàm toàn cục cho SmartOrderTrigger.m gọi
 void notify_burst_state_to_button(BOOL active) {
     [[KeyAuthManager sharedInstance] triggerButtonBurstEffect:active];
 }
