@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 #import <dispatch/dispatch.h>
 
 #ifdef __cplusplus
@@ -10,13 +11,15 @@ extern void set_speed_factor(float factor);
 #endif
 
 // ==========================================
-// CẤU HÌNH API GOOGLE SHEETS ĐÃ TÍCH HỢP URL
+// CẤU HÌNH API GOOGLE SHEETS
 // ==========================================
 #define GOOGLE_SHEET_API_URL @"https://script.google.com/macros/s/AKfycbxJ9hbctimNO5x23W5YT06SLunhJcUKIdkEzd652nhICuxGmugziDna5GEYkwQgqZEJ/exec"
+#define KEYCHAIN_SERVICE @"com.speedhack.device.service"
+#define KEYCHAIN_ACCOUNT @"PermanentDeviceID"
 
 @interface SmartOrderManager : NSObject
-@property (nonatomic, assign) BOOL isAuthorized;      // Quyền hoạt động xác thực từ Google Sheets
-@property (nonatomic, assign) NSInteger triggerSecond;// Mốc giây bứt tốc cấu hình từ Sheets
+@property (nonatomic, assign) BOOL isAuthorized;
+@property (nonatomic, assign) NSInteger triggerSecond;
 @property (nonatomic, assign) BOOL isTriggered;
 @property (nonatomic, strong) dispatch_source_t scanTimer;
 @property (nonatomic, strong) dispatch_source_t syncTimer;
@@ -25,7 +28,6 @@ extern void set_speed_factor(float factor);
 @implementation SmartOrderManager
 
 + (void)load {
-    // Trì hoãn 2 giây để app khởi tạo xong giao diện và kết nối mạng
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[SmartOrderManager sharedInstance] startService];
     });
@@ -37,26 +39,63 @@ extern void set_speed_factor(float factor);
     dispatch_once(&onceToken, ^{
         instance = [[SmartOrderManager alloc] init];
         instance.isAuthorized = NO;
-        instance.triggerSecond = 3; // Mặc định là 3 giây nếu chưa đồng bộ xong
+        instance.triggerSecond = 3;
         instance.isTriggered = NO;
     });
     return instance;
 }
 
+// ==========================================
+// QUẢN LÝ MÃ THIẾT BỊ VĨNH VIỄN BẰNG KEYCHAIN
+// ==========================================
 - (NSString *)getDeviceID {
+    // 1. Kiểm tra mã đã từng lưu trong Keychain chưa
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
+        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT,
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+    };
+
+    CFTypeRef dataTypeRef = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &dataTypeRef);
+    if (status == errSecSuccess) {
+        NSData *data = (__bridge_transfer NSData *)dataTypeRef;
+        NSString *savedID = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (savedID && savedID.length == 8) {
+            return savedID; // Trả về mã cũ dù đã xóa app cài lại
+        }
+    }
+
+    // 2. Nếu máy hoàn toàn mới (chưa có trong Keychain) -> Tạo mã 8 ký tự
     NSString *uuid = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-    if (!uuid) return @"UNKNOWN0";
-    return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
+    if (!uuid) {
+        uuid = [[NSUUID UUID] UUIDString];
+    }
+    NSString *newDeviceID = [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
+
+    // 3. Khóa chặt mã này vào Keychain với cờ kSecAttrAccessibleAfterFirstUnlock (tồn tại vĩnh viễn)
+    NSData *dataToStore = [newDeviceID dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *addQuery = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
+        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT,
+        (__bridge id)kSecValueData: dataToStore,
+        (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlock
+    };
+    SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+
+    return newDeviceID;
 }
 
 - (void)startService {
-    // Luôn đưa tốc độ về chuẩn x1.0 khi khởi động
     set_speed_factor(1.0f);
 
-    // 1. Kiểm tra trạng thái ngay lần đầu mở app
+    // Đồng bộ trạng thái với Google Sheets
     [self syncWithGoogleSheets];
 
-    // 2. Chạy Timer đồng bộ ngầm định kỳ mỗi 5 phút một lần để cập nhật trạng thái mới nhất từ Sheets
+    // Định kỳ 5 phút kiểm tra lại quyền 1 lần
     self.syncTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(self.syncTimer, dispatch_walltime(NULL, 0), 300ull * NSEC_PER_SEC, 10ull * NSEC_PER_SEC);
     __weak typeof(self) weakSelf = self;
@@ -65,7 +104,7 @@ extern void set_speed_factor(float factor);
     });
     dispatch_resume(self.syncTimer);
 
-    // 3. Chạy Timer quét màn hình (chu kỳ 400ms - cực nhẹ, không nghẽn CPU)
+    // Quét màn hình bắt giây
     self.scanTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(self.scanTimer, dispatch_walltime(NULL, 0), 400ull * NSEC_PER_MSEC, 100ull * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(self.scanTimer, ^{
@@ -74,7 +113,6 @@ extern void set_speed_factor(float factor);
     dispatch_resume(self.scanTimer);
 }
 
-// Gửi Device_ID về Google Sheets và nhận trạng thái
 - (void)syncWithGoogleSheets {
     NSString *deviceID = [self getDeviceID];
     NSString *urlStr = [NSString stringWithFormat:@"%@?device_id=%@", GOOGLE_SHEET_API_URL, deviceID];
@@ -101,7 +139,7 @@ extern void set_speed_factor(float factor);
                         self.triggerSecond = sec;
                     }
                     if (!active) {
-                        set_speed_factor(1.0f); // Nếu bị LOCKED hoặc hết hạn, cưỡng chế về x1.0
+                        set_speed_factor(1.0f);
                     }
                 });
             }
@@ -110,9 +148,7 @@ extern void set_speed_factor(float factor);
     [task resume];
 }
 
-// Quét giao diện nhẹ nhàng
 - (void)scanCurrentScreenFast {
-    // Nếu chưa được cấp quyền trên Google Sheets thì không can thiệp
     if (!self.isAuthorized) return;
 
     UIWindow *window = [UIApplication sharedApplication].keyWindow;
@@ -123,20 +159,16 @@ extern void set_speed_factor(float factor);
 
     [self fastSearch:window currentDepth:0 maxDepth:8 foundTarget:&foundTargetSecond foundOrder:&foundOrderScreen];
 
-    // PHÁT HIỆN ĐÚNG MỐC GIÂY ĐƯỢC CHỈ ĐỊNH TỪ GOOGLE SHEETS
     if (foundTargetSecond && !self.isTriggered) {
         self.isTriggered = YES;
 
-        // 1. Kích hoạt x5.0
         set_speed_factor(5.0f);
 
-        // 2. Chạy đúng 1.0 giây rồi trả về x1.0 an toàn
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             set_speed_factor(1.0f);
         });
     }
 
-    // Khi thanh đơn chuyển màu hoặc rời màn hình đơn -> Reset cờ sẵn sàng cho đơn sau
     if (!foundOrderScreen) {
         self.isTriggered = NO;
     }
@@ -145,11 +177,9 @@ extern void set_speed_factor(float factor);
 - (void)fastSearch:(UIView *)view currentDepth:(NSInteger)depth maxDepth:(NSInteger)maxDepth foundTarget:(BOOL *)foundTarget foundOrder:(BOOL *)foundOrder {
     if (!view || view.isHidden || view.alpha < 0.1 || depth > maxDepth) return;
 
-    // Tạo chuỗi mục tiêu cần tìm dựa trên triggerSecond lấy từ Sheets (ví dụ: "sau 3 giây", "sau 5 giây")
     NSString *matchPattern1 = [NSString stringWithFormat:@"sau %ld giây", (long)self.triggerSecond];
     NSString *matchPattern2 = [NSString stringWithFormat:@"%ld giây", (long)self.triggerSecond];
 
-    // 1. Quét text trên UILabel
     if ([view isKindOfClass:[UILabel class]]) {
         NSString *txt = [(UILabel *)view text];
         if (txt.length > 5) {
@@ -164,7 +194,6 @@ extern void set_speed_factor(float factor);
             }
         }
     } else {
-        // 2. Quét accessibility của React Native
         NSString *acc = view.accessibilityLabel;
         if (acc.length > 5) {
             if ([acc containsString:@"được nhận đơn sau"]) {
