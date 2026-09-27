@@ -46,10 +46,28 @@ extern void set_speed_factor(float factor);
 }
 
 // ==========================================
+// LẤY CỬA SỔ HIỂN THỊ CHUẨN (KHÔNG BỊ DEPRECATED)
+// ==========================================
++ (UIWindow *)findActiveWindow {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *w in windowScene.windows) {
+                    if (w.isKeyWindow) {
+                        return w;
+                    }
+                }
+            }
+        }
+    }
+    return [UIApplication sharedApplication].windows.firstObject;
+}
+
+// ==========================================
 // QUẢN LÝ MÃ THIẾT BỊ VĨNH VIỄN BẰNG KEYCHAIN
 // ==========================================
 - (NSString *)getDeviceID {
-    // 1. Kiểm tra mã đã từng lưu trong Keychain chưa
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
@@ -64,18 +82,16 @@ extern void set_speed_factor(float factor);
         NSData *data = (__bridge_transfer NSData *)dataTypeRef;
         NSString *savedID = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         if (savedID && savedID.length == 8) {
-            return savedID; // Trả về mã cũ dù đã xóa app cài lại
+            return savedID;
         }
     }
 
-    // 2. Nếu máy hoàn toàn mới (chưa có trong Keychain) -> Tạo mã 8 ký tự
     NSString *uuid = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
     if (!uuid) {
         uuid = [[NSUUID UUID] UUIDString];
     }
     NSString *newDeviceID = [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 
-    // 3. Khóa chặt mã này vào Keychain với cờ kSecAttrAccessibleAfterFirstUnlock (tồn tại vĩnh viễn)
     NSData *dataToStore = [newDeviceID dataUsingEncoding:NSUTF8StringEncoding];
     NSDictionary *addQuery = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
@@ -95,7 +111,7 @@ extern void set_speed_factor(float factor);
     // Đồng bộ trạng thái với Google Sheets
     [self syncWithGoogleSheets];
 
-    // Định kỳ 5 phút kiểm tra lại quyền 1 lần
+    // Định kỳ 5 phút kiểm tra lại quyền từ xa 1 lần
     self.syncTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(self.syncTimer, dispatch_walltime(NULL, 0), 300ull * NSEC_PER_SEC, 10ull * NSEC_PER_SEC);
     __weak typeof(self) weakSelf = self;
@@ -104,7 +120,7 @@ extern void set_speed_factor(float factor);
     });
     dispatch_resume(self.syncTimer);
 
-    // Quét màn hình bắt giây
+    // Quét màn hình bắt đúng giây chỉ định
     self.scanTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(self.scanTimer, dispatch_walltime(NULL, 0), 400ull * NSEC_PER_MSEC, 100ull * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(self.scanTimer, ^{
@@ -151,7 +167,7 @@ extern void set_speed_factor(float factor);
 - (void)scanCurrentScreenFast {
     if (!self.isAuthorized) return;
 
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    UIWindow *window = [SmartOrderManager findActiveWindow];
     if (!window) return;
 
     BOOL foundTargetSecond = NO;
