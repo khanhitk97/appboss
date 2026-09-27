@@ -26,10 +26,7 @@ jobs:
             -fobjc-arc \
             -framework Foundation \
             -framework UIKit \
-            -framework CoreGraphics \
-            -framework CoreFoundation \
-            -framework Security \
-            fishhook.c Speedhack.m SpeedhackMenu.m SmartOrderTrigger.m \
+            fishhook.c Speedhack.m SmartOrderTrigger.m \
             -o build/Speedhack.dylib
 
       - name: Ad-hoc Code Sign
