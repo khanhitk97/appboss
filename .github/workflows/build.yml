@@ -26,7 +26,6 @@ jobs:
             -fobjc-arc \
             -framework Foundation \
             -framework UIKit \
-            -framework Security \
             fishhook.c Speedhack.m SmartOrderTrigger.m \
             -o build/Speedhack.dylib
 
