@@ -17,17 +17,19 @@ extern void set_speed_factor(float factor);
 #define KEYCHAIN_SERVICE @"com.speedhack.device.service"
 #define KEYCHAIN_ACCOUNT @"PermanentDeviceID"
 
-@interface SmartOrderManager : NSObject
+@interface SmartOrderManager : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate>
 @property (nonatomic, assign) BOOL isAuthorized;
 @property (nonatomic, assign) NSInteger triggerSecond;
 @property (nonatomic, assign) BOOL isTriggered;
 @property (nonatomic, strong) dispatch_source_t scanTimer;
 @property (nonatomic, strong) dispatch_source_t syncTimer;
+@property (nonatomic, strong) NSURLSession *session;
 @end
 
 @implementation SmartOrderManager
 
 + (void)load {
+    // Chờ 2 giây sau khi app nạp xong môi trường mạng
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[SmartOrderManager sharedInstance] startService];
     });
@@ -41,12 +43,19 @@ extern void set_speed_factor(float factor);
         instance.isAuthorized = NO;
         instance.triggerSecond = 3;
         instance.isTriggered = NO;
+
+        // Cấu hình NSURLSession tự động theo đuôi chuyển hướng (Redirect 302 của Google)
+        NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+        config.requestCachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
+        config.timeoutIntervalForRequest = 15.0;
+        config.timeoutIntervalForResource = 30.0;
+        instance.session = [NSURLSession sessionWithConfiguration:config delegate:instance delegateQueue:nil];
     });
     return instance;
 }
 
 // ==========================================
-// LẤY CỬA SỔ HIỂN THỊ CHUẨN (KHÔNG BỊ DEPRECATED)
+// LẤY CỬA SỔ CHUẨN TRÊN IOS 13+
 // ==========================================
 + (UIWindow *)findActiveWindow {
     if (@available(iOS 13.0, *)) {
@@ -108,19 +117,19 @@ extern void set_speed_factor(float factor);
 - (void)startService {
     set_speed_factor(1.0f);
 
-    // Đồng bộ trạng thái với Google Sheets
+    // 1. Gửi request đầu tiên ngay khi mở app
     [self syncWithGoogleSheets];
 
-    // Định kỳ 5 phút kiểm tra lại quyền từ xa 1 lần
+    // 2. Định kỳ mỗi 3 phút đồng bộ lại 1 lần
     self.syncTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(self.syncTimer, dispatch_walltime(NULL, 0), 300ull * NSEC_PER_SEC, 10ull * NSEC_PER_SEC);
+    dispatch_source_set_timer(self.syncTimer, dispatch_walltime(NULL, 0), 180ull * NSEC_PER_SEC, 10ull * NSEC_PER_SEC);
     __weak typeof(self) weakSelf = self;
     dispatch_source_set_event_handler(self.syncTimer, ^{
         [weakSelf syncWithGoogleSheets];
     });
     dispatch_resume(self.syncTimer);
 
-    // Quét màn hình bắt đúng giây chỉ định
+    // 3. Quét màn hình canh giây
     self.scanTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(self.scanTimer, dispatch_walltime(NULL, 0), 400ull * NSEC_PER_MSEC, 100ull * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(self.scanTimer, ^{
@@ -129,19 +138,26 @@ extern void set_speed_factor(float factor);
     dispatch_resume(self.scanTimer);
 }
 
+// Xử lý chuyển hướng HTTP 302 chuẩn từ Google Apps Script
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
+    completionHandler(request);
+}
+
+// Gửi ID về Google Sheets
 - (void)syncWithGoogleSheets {
     NSString *deviceID = [self getDeviceID];
-    NSString *urlStr = [NSString stringWithFormat:@"%@?device_id=%@", GOOGLE_SHEET_API_URL, deviceID];
+    NSString *encodedID = [deviceID stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *urlStr = [NSString stringWithFormat:@"%@?device_id=%@", GOOGLE_SHEET_API_URL, encodedID];
     NSURL *url = [NSURL URLWithString:urlStr];
     if (!url) return;
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
-                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                       timeoutInterval:10.0];
-    request.HTTPMethod = @"GET";
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData
+                                                       timeoutInterval:15.0];
+    [request setHTTPMethod:@"GET"];
+    [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-                                                                 completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         if (!error && data) {
             NSError *jsonErr = nil;
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
@@ -164,6 +180,7 @@ extern void set_speed_factor(float factor);
     [task resume];
 }
 
+// Quét màn hình bắt đúng giây
 - (void)scanCurrentScreenFast {
     if (!self.isAuthorized) return;
 
