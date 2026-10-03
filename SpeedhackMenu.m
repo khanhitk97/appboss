@@ -1,7 +1,9 @@
 #import <UIKit/UIKit.h>
 
-// Thay URL Web App của bạn vào đây
-#define GOOGLE_SHEET_API_URL @"https://script.google.com/macros/s/AKfycbxhrz4aZ5eaDNMzyLk4lejznQNoipIE7VN7qOLmy0TNxjddHaNzKmWjxIubgIrbiKhh/exec"
+// ==========================================
+// CẤU HÌNH API GOOGLE SHEETS MỚI NHẤT
+// ==========================================
+#define GOOGLE_SHEET_API_URL @"https://script.google.com/macros/s/AKfycbz6gvfUZuyuO8-BW8tRVkoTFGPvZNu_eJPz1JtI9AuVnUQd2NLKcMCCQ4wBckVPPg5V/exec"
 
 #define USER_PHONE_KEY @"SAVED_USER_PHONE"
 #define USER_PASS_KEY  @"SAVED_USER_PASS"
