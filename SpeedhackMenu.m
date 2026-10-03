@@ -1,7 +1,7 @@
 #import <UIKit/UIKit.h>
 
 // ==========================================
-// CẤU HÌNH API GOOGLE SHEETS MỚI NHẤT
+// CẤU HÌNH API GOOGLE SHEETS
 // ==========================================
 #define GOOGLE_SHEET_API_URL @"https://script.google.com/macros/s/AKfycbz6gvfUZuyuO8-BW8tRVkoTFGPvZNu_eJPz1JtI9AuVnUQd2NLKcMCCQ4wBckVPPg5V/exec"
 
@@ -11,6 +11,14 @@
 #define USER_TRIGGER_SEC_KEY @"SAVED_USER_TRIGGER_SEC"
 #define USER_EXPIRE_KEY @"SAVED_USER_EXPIRE"
 #define USER_STATUS_KEY @"SAVED_USER_STATUS"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern void set_speed_factor(float factor);
+#ifdef __cplusplus
+}
+#endif
 
 @interface AuthManager : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIWindow *appWindow;
@@ -33,6 +41,7 @@ static AuthManager *sharedAuth = nil;
             sharedAuth = [[AuthManager alloc] init];
             sharedAuth.appWindow = window;
             [sharedAuth setupGesture];
+            [sharedAuth setupAppStateObservers];
             [sharedAuth startHeartbeat];
         }
     });
@@ -56,6 +65,18 @@ static AuthManager *sharedAuth = nil;
     NSString *uuid = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
     if (!uuid) return @"UNKNOWN0";
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
+}
+
+// Bắt sự kiện khi app mở lại từ màn hình khóa hoặc từ ứng dụng khác chuyển sang
+- (void)setupAppStateObservers {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleAppDidBecomeActive)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+}
+
+- (void)handleAppDidBecomeActive {
+    [self autoCheckLicense];
 }
 
 // Cử chỉ chạm giữ 3 ngón tay trong 3 giây
@@ -85,12 +106,12 @@ static AuthManager *sharedAuth = nil;
     }
 }
 
-// Kiểm tra ngầm định kỳ mỗi 3 phút
+// Kiểm tra ngầm định kỳ mỗi 60 giây (1 phút) để đồng bộ nhanh hơn
 - (void)startHeartbeat {
     [self autoCheckLicense];
 
     self.heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(self.heartbeatTimer, dispatch_walltime(NULL, 0), 180ull * NSEC_PER_SEC, 10ull * NSEC_PER_SEC);
+    dispatch_source_set_timer(self.heartbeatTimer, dispatch_walltime(NULL, 0), 60ull * NSEC_PER_SEC, 5ull * NSEC_PER_SEC);
     __weak typeof(self) weakSelf = self;
     dispatch_source_set_event_handler(self.heartbeatTimer, ^{
         [weakSelf autoCheckLicense];
@@ -110,7 +131,7 @@ static AuthManager *sharedAuth = nil;
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                   timeoutInterval:15.0];
+                                                   timeoutInterval:10.0];
     req.HTTPMethod = @"GET";
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
@@ -122,19 +143,25 @@ static AuthManager *sharedAuth = nil;
                 NSString *status = json[@"status"] ?: @"PENDING";
                 NSString *expire = json[@"expire_at"] ?: @"";
 
-                [[NSUserDefaults standardUserDefaults] setBool:active forKey:USER_ACTIVE_KEY];
-                [[NSUserDefaults standardUserDefaults] setObject:status forKey:USER_STATUS_KEY];
-                [[NSUserDefaults standardUserDefaults] setObject:expire forKey:USER_EXPIRE_KEY];
-                if (sec > 0) {
-                    [[NSUserDefaults standardUserDefaults] setInteger:sec forKey:USER_TRIGGER_SEC_KEY];
-                }
-                [[NSUserDefaults standardUserDefaults] synchronize];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [[NSUserDefaults standardUserDefaults] setBool:active forKey:USER_ACTIVE_KEY];
+                    [[NSUserDefaults standardUserDefaults] setObject:status forKey:USER_STATUS_KEY];
+                    [[NSUserDefaults standardUserDefaults] setObject:expire forKey:USER_EXPIRE_KEY];
+                    if (sec > 0) {
+                        [[NSUserDefaults standardUserDefaults] setInteger:sec forKey:USER_TRIGGER_SEC_KEY];
+                    }
+                    [[NSUserDefaults standardUserDefaults] synchronize];
+
+                    // Nếu phát hiện trạng thái không còn active thì reset tốc độ ngay lập tức
+                    if (!active) {
+                        set_speed_factor(1.0f);
+                    }
+                });
             }
         }
     }] resume];
 }
 
-// Điều hướng giao diện: Nếu đã có tài khoản thì hiện Dashboard, nếu chưa thì hiện Form Đăng nhập
 - (void)showMainInterface {
     NSString *savedPhone = [[NSUserDefaults standardUserDefaults] stringForKey:USER_PHONE_KEY];
     if (savedPhone && savedPhone.length > 0) {
@@ -156,8 +183,34 @@ static AuthManager *sharedAuth = nil;
     NSInteger sec = [[NSUserDefaults standardUserDefaults] integerForKey:USER_TRIGGER_SEC_KEY];
     if (sec <= 0) sec = 3;
 
-    NSString *msg = [NSString stringWithFormat:@"Tài khoản: %@\nID Máy: %@\nTrạng thái: %@\nHạn dùng: %@\nMốc bứt tốc: %ld giây",
-                     phone, [self getDeviceID], status, expire, (long)sec];
+    // Tính thời gian còn lại trực tiếp
+    NSString *remainingTimeStr = @"";
+    if (expire.length > 0) {
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        [df setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+        [df setTimeZone:[NSTimeZone timeZoneWithName:@"GMT+7"]];
+        NSDate *expDate = [df dateFromString:expire];
+        if (expDate) {
+            NSTimeInterval diff = [expDate timeIntervalSinceNow];
+            if (diff > 0) {
+                NSInteger mins = (NSInteger)(diff / 60);
+                NSInteger hours = mins / 60;
+                NSInteger days = hours / 24;
+                if (days > 0) {
+                    remainingTimeStr = [NSString stringWithFormat:@"\n(Còn lại: %ld ngày %ld giờ)", (long)days, (long)(hours % 24)];
+                } else if (hours > 0) {
+                    remainingTimeStr = [NSString stringWithFormat:@"\n(Còn lại: %ld giờ %ld phút)", (long)hours, (long)(mins % 60)];
+                } else {
+                    remainingTimeStr = [NSString stringWithFormat:@"\n(Còn lại: %ld phút %ld giây)", (long)mins, (long)((NSInteger)diff % 60)];
+                }
+            } else {
+                remainingTimeStr = @"\n(ĐÃ HẾT HẠN)";
+            }
+        }
+    }
+
+    NSString *msg = [NSString stringWithFormat:@"Tài khoản: %@\nID Máy: %@\nTrạng thái: %@\nHạn dùng: %@%@\nMốc bứt tốc: %ld giây",
+                     phone, [self getDeviceID], status, expire, remainingTimeStr, (long)sec];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"THÔNG TIN TÀI KHOẢN"
                                                                    message:msg
@@ -174,6 +227,7 @@ static AuthManager *sharedAuth = nil;
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:USER_STATUS_KEY];
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:USER_EXPIRE_KEY];
         [[NSUserDefaults standardUserDefaults] synchronize];
+        set_speed_factor(1.0f);
         [self showAuthInputDialog];
     }]];
 
@@ -267,6 +321,10 @@ static AuthManager *sharedAuth = nil;
                         [[NSUserDefaults standardUserDefaults] setInteger:sec forKey:USER_TRIGGER_SEC_KEY];
                     }
                     [[NSUserDefaults standardUserDefaults] synchronize];
+
+                    if (!active) {
+                        set_speed_factor(1.0f);
+                    }
                 }
 
                 [self showAlertMessage:message];
@@ -289,8 +347,34 @@ static AuthManager *sharedAuth = nil;
 
 @end
 
+// ==========================================
+// KIỂM TRA BẢN QUYỀN TRỰC TIẾP TỪ THỜI GIAN THỰC
+// ==========================================
 BOOL is_license_active(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:USER_ACTIVE_KEY];
+    BOOL isActiveFlag = [[NSUserDefaults standardUserDefaults] boolForKey:USER_ACTIVE_KEY];
+    if (!isActiveFlag) return NO;
+
+    NSString *expireStr = [[NSUserDefaults standardUserDefaults] stringForKey:USER_EXPIRE_KEY];
+    if (!expireStr || expireStr.length == 0) return NO;
+
+    // So sánh trực tiếp giờ hiện tại với mốc hết hạn
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    [df setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+    [df setTimeZone:[NSTimeZone timeZoneWithName:@"GMT+7"]];
+    NSDate *expireDate = [df dateFromString:expireStr];
+
+    if (expireDate) {
+        if ([[NSDate date] compare:expireDate] == NSOrderedDescending) {
+            // Đã quá giờ hết hạn -> tự động ngắt cờ active
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:USER_ACTIVE_KEY];
+            [[NSUserDefaults standardUserDefaults] setObject:@"EXPIRED" forKey:USER_STATUS_KEY];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            set_speed_factor(1.0f);
+            return NO;
+        }
+    }
+
+    return YES;
 }
 
 NSInteger get_current_trigger_second(void) {
