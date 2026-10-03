@@ -1,490 +1,48 @@
 #import <UIKit/UIKit.h>
-#import <CommonCrypto/CommonDigest.h>
-#import <Security/Security.h>
-#import <time.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern void set_speed_factor(float factor);
-#ifdef __cplusplus
-}
-#endif
+// Thay URL Web App của bạn vào đây
+#define GOOGLE_SHEET_API_URL @"https://script.google.com/macros/s/AKfycbxhrz4aZ5eaDNMzyLk4lejznQNoipIE7VN7qOLmy0TNxjddHaNzKmWjxIubgIrbiKhh/exec"
 
-#define KEY_STORAGE @"SAVED_SPEEDHACK_LICENSE_KEY"
-#define EXPIRE_STORAGE @"SPEEDHACK_EXPIRATION_TIME"
-#define SECRET_SALT @"SECRET_SALT_2026"
-#define KEYCHAIN_SERVICE @"com.speedhack.license.service"
-#define KEYCHAIN_ACCOUNT @"UsedNoncesHistory"
+#define USER_PHONE_KEY @"SAVED_USER_PHONE"
+#define USER_PASS_KEY  @"SAVED_USER_PASS"
+#define USER_ACTIVE_KEY @"SAVED_USER_ACTIVE"
+#define USER_TRIGGER_SEC_KEY @"SAVED_USER_TRIGGER_SEC"
+#define USER_EXPIRE_KEY @"SAVED_USER_EXPIRE"
+#define USER_STATUS_KEY @"SAVED_USER_STATUS"
 
-// ==========================================
-// QUẢN LÝ LỊCH SỬ KEY TRÊN IOS KEYCHAIN
-// ==========================================
-static NSArray *get_used_nonces_from_keychain(void) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
-        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT,
-        (__bridge id)kSecReturnData: @YES,
-        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
-    };
-
-    CFTypeRef dataTypeRef = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &dataTypeRef);
-    if (status == errSecSuccess) {
-        NSData *data = (__bridge_transfer NSData *)dataTypeRef;
-        NSError *err = nil;
-        NSArray *arr = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
-        if (!err && [arr isKindOfClass:[NSArray class]]) {
-            return arr;
-        }
-    }
-    return @[];
-}
-
-static BOOL is_nonce_already_used(NSString *nonce) {
-    NSArray *usedList = get_used_nonces_from_keychain();
-    return [usedList containsObject:nonce];
-}
-
-static void save_nonce_to_keychain(NSString *nonce) {
-    NSMutableArray *usedList = [get_used_nonces_from_keychain() mutableCopy];
-    if (!usedList) usedList = [NSMutableArray array];
-    if (![usedList containsObject:nonce]) {
-        [usedList addObject:nonce];
-    }
-
-    NSData *data = [NSJSONSerialization dataWithJSONObject:usedList options:0 error:nil];
-    if (!data) return;
-
-    NSDictionary *deleteQuery = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
-        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT
-    };
-    SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
-
-    NSDictionary *addQuery = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: KEYCHAIN_SERVICE,
-        (__bridge id)kSecAttrAccount: KEYCHAIN_ACCOUNT,
-        (__bridge id)kSecValueData: data,
-        (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlock
-    };
-    SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
-}
-
-// ==========================================
-// ĐỒNG HỒ THỜI GIAN THỰC (INTERNET + MONOTONIC)
-// ==========================================
-static uint64_t get_raw_hardware_tick(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-    return (uint64_t)ts.tv_sec;
-}
-
-static int64_t g_network_time_offset = 0;
-static BOOL g_has_synced_network_time = NO;
-
-uint64_t get_current_real_time(void) {
-    if (!g_has_synced_network_time) {
-        return (uint64_t)[[NSDate date] timeIntervalSince1970];
-    }
-    return (uint64_t)(get_raw_hardware_tick() + g_network_time_offset);
-}
-
-static void sync_time_from_internet(void (^completion)(BOOL success)) {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://www.google.com"]
-                                                           cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData 
-                                                       timeoutInterval:5.0];
-    request.HTTPMethod = @"HEAD";
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        if (!error && [response isKindOfClass:[NSHTTPURLResponse class]]) {
-            NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-            NSString *dateStr = httpResponse.allHeaderFields[@"Date"];
-            
-            if (dateStr) {
-                NSDateFormatter *rfc1123 = [[NSDateFormatter alloc] init];
-                [rfc1123 setDateFormat:@"EEE, dd MMM yyyy HH:mm:ss z"];
-                [rfc1123 setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"]];
-                [rfc1123 setTimeZone:[NSTimeZone timeZoneWithAbbreviation:@"GMT"]];
-                
-                NSDate *serverDate = [rfc1123 dateFromString:dateStr];
-                if (serverDate) {
-                    uint64_t serverSec = (uint64_t)[serverDate timeIntervalSince1970];
-                    uint64_t hardwareTick = get_raw_hardware_tick();
-                    g_network_time_offset = (int64_t)serverSec - (int64_t)hardwareTick;
-                    g_has_synced_network_time = YES;
-                    
-                    if (completion) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            completion(YES);
-                        });
-                    }
-                    return;
-                }
-            }
-        }
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(NO);
-            });
-        }
-    }];
-    [task resume];
-}
-
-// ==========================================
-// XÁC THỰC VÀ BÓC TÁCH GÓI TỪ KEY
-// ==========================================
-static uint64_t parse_duration_from_plan(NSString *planCode) {
-    if (planCode.length < 2) return 0;
-    
-    char unit = [planCode characterAtIndex:0];
-    int value = [[planCode substringFromIndex:1] intValue];
-    if (value <= 0) return 0;
-
-    switch (unit) {
-        case 'M': return (uint64_t)value * 60;
-        case 'H': return (uint64_t)value * 3600;
-        case 'D': return (uint64_t)value * 86400;
-        default: return 0;
-    }
-}
-
-static NSString *generate_signature(NSString *planCode, NSString *deviceID, NSString *nonce) {
-    NSString *raw = [NSString stringWithFormat:@"%@_%@_%@_%@", planCode, deviceID, nonce, SECRET_SALT];
-    const char *cStr = [raw UTF8String];
-    unsigned char digest[CC_MD5_DIGEST_LENGTH];
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    CC_MD5(cStr, (CC_LONG)strlen(cStr), digest);
-#pragma clang diagnostic pop
-
-    NSMutableString *hash = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
-    for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
-        [hash appendFormat:@"%02X", digest[i]];
-    }
-    return [hash substringToIndex:6];
-}
-
-static BOOL g_is_auto_enabled = YES;
-
-BOOL is_license_active(void) {
-    if (!g_is_auto_enabled) return NO;
-    NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
-    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    uint64_t now = get_current_real_time();
-    return (savedKey != nil && expireTime > 0 && now < expireTime);
-}
-
-// ==========================================
-// VIEW CHỐNG CHỤP MÀN HÌNH (CHUẨN HÓA CẢM ỨNG)
-// ==========================================
-@interface SecureContainerView : UIView
-@property (nonatomic, strong) UITextField *secureTextField;
-@property (nonatomic, weak) UIView *canvasContainer;
-@end
-
-@implementation SecureContainerView
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.backgroundColor = [UIColor clearColor];
-        self.clipsToBounds = NO;
-        self.userInteractionEnabled = YES;
-
-        self.secureTextField = [[UITextField alloc] initWithFrame:self.bounds];
-        self.secureTextField.secureTextEntry = YES;
-        self.secureTextField.backgroundColor = [UIColor clearColor];
-        self.secureTextField.userInteractionEnabled = YES;
-        [self addSubview:self.secureTextField];
-
-        // Lấy lớp Canvas ẩn bên dưới UITextField
-        UIView *canvas = nil;
-        for (UIView *sub in self.secureTextField.subviews) {
-            if ([NSStringFromClass([sub class]) containsString:@"CanvasView"] ||
-                [NSStringFromClass([sub class]) containsString:@"TextEffects"]) {
-                canvas = sub;
-                break;
-            }
-        }
-        if (!canvas && self.secureTextField.subviews.count > 0) {
-            canvas = self.secureTextField.subviews.firstObject;
-        }
-
-        if (canvas) {
-            canvas.userInteractionEnabled = YES;
-            _canvasContainer = canvas;
-        } else {
-            _canvasContainer = self;
-        }
-    }
-    return self;
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    self.secureTextField.frame = self.bounds;
-    if (self.canvasContainer && self.canvasContainer != self) {
-        self.canvasContainer.frame = self.bounds;
-    }
-}
-
-// Truyền chuẩn xác mọi thao tác chạm/kéo/nhấn tới view con
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.hidden || self.alpha < 0.01 || !self.userInteractionEnabled) {
-        return nil;
-    }
-    
-    if ([self pointInside:point withEvent:event]) {
-        for (UIView *subview in [self.canvasContainer.subviews reverseObjectEnumerator]) {
-            if (!subview.hidden && subview.alpha > 0.01 && subview.userInteractionEnabled) {
-                CGPoint subPoint = [subview convertPoint:point fromView:self];
-                UIView *hit = [subview hitTest:subPoint withEvent:event];
-                if (hit) return hit;
-            }
-        }
-        if (self.canvasContainer.subviews.count > 0) {
-            return self.canvasContainer.subviews.firstObject;
-        }
-    }
-    return nil;
-}
-
-@end
-
-// ==========================================
-// GIAO DIỆN NÚT NỔI (FLOATING BUTTON)
-// ==========================================
-@protocol SpeedhackButtonDelegate <NSObject>
-- (void)onOpenKeyDialog;
-@end
-
-@interface SpeedhackFloatingButton : UIButton <UIGestureRecognizerDelegate>
-@property (nonatomic, assign) BOOL isLocked;
-@property (nonatomic, assign) BOOL isAutoRunning;
-@property (nonatomic, strong) NSTimer *idleTimer;
-@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
-@property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
-@property (nonatomic, weak) id<SpeedhackButtonDelegate> delegate;
-@end
-
-@implementation SpeedhackFloatingButton
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.layer.cornerRadius = frame.size.width / 2.0;
-        self.layer.masksToBounds = YES;
-        self.layer.borderWidth = 1.5;
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
-        self.titleLabel.textAlignment = NSTextAlignmentCenter;
-        self.userInteractionEnabled = YES;
-
-        self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        self.panGesture.delegate = self;
-        [self addGestureRecognizer:self.panGesture];
-
-        // Nhấn giữ 3.0 giây để mở bảng bản quyền
-        self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        self.longPressGesture.minimumPressDuration = 3.0;
-        self.longPressGesture.allowableMovement = 15.0;
-        self.longPressGesture.delegate = self;
-        [self addGestureRecognizer:self.longPressGesture];
-
-        [self addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
-
-        _isLocked = NO;
-        _isAutoRunning = YES;
-        set_speed_factor(1.0f);
-
-        [self updateButtonUI];
-        [self resetIdleTimer];
-    }
-    return self;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES;
-}
-
-- (void)setLockedState:(BOOL)locked {
-    _isLocked = locked;
-    [self.idleTimer invalidate];
-    set_speed_factor(1.0f);
-
-    if (_isLocked) {
-        self.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.8];
-        self.layer.borderColor = [UIColor colorWithWhite:0.5 alpha:0.5].CGColor;
-        [self setTitle:@"🔒" forState:UIControlStateNormal];
-        self.alpha = 0.4;
-    } else {
-        _isAutoRunning = YES;
-        g_is_auto_enabled = YES;
-        [self updateButtonUI];
-        [self resetIdleTimer];
-    }
-}
-
-- (void)showBurstEffect:(BOOL)isBursting {
-    if (_isLocked) return;
-
-    if (isBursting) {
-        [self bringToFullAlpha];
-        self.backgroundColor = [UIColor colorWithRed:1.0 green:0.5 blue:0.0 alpha:0.95]; // Màu cam
-        self.layer.borderColor = [UIColor whiteColor].CGColor;
-        [self setTitle:@"⚡" forState:UIControlStateNormal];
-
-        if (@available(iOS 10.0, *)) {
-            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-            [fb impactOccurred];
-        }
-    } else {
-        [self updateButtonUI];
-        [self resetIdleTimer];
-    }
-}
-
-- (void)updateButtonUI {
-    if (_isLocked) return;
-
-    if (_isAutoRunning) {
-        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.75 blue:0.25 alpha:0.9]; // Xanh lá
-        self.layer.borderColor = [UIColor whiteColor].CGColor;
-        [self setTitle:@"⚡" forState:UIControlStateNormal];
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
-    } else {
-        self.backgroundColor = [UIColor colorWithWhite:0.4 alpha:0.85]; // Xám tắt
-        self.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:0.8].CGColor;
-        [self setTitle:@"OFF" forState:UIControlStateNormal];
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    }
-}
-
-- (void)handleTap {
-    if (_isLocked) {
-        if ([self.delegate respondsToSelector:@selector(onOpenKeyDialog)]) {
-            [self.delegate onOpenKeyDialog];
-        }
-        return;
-    }
-
-    _isAutoRunning = !_isAutoRunning;
-    g_is_auto_enabled = _isAutoRunning;
-    [self updateButtonUI];
-    [self resetIdleTimer];
-}
-
-- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        if (@available(iOS 10.0, *)) {
-            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-            [feedback impactOccurred];
-        }
-        if ([self.delegate respondsToSelector:@selector(onOpenKeyDialog)]) {
-            [self.delegate onOpenKeyDialog];
-        }
-    }
-}
-
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *targetContainer = self.superview;
-    while (targetContainer && ![targetContainer isKindOfClass:[SecureContainerView class]]) {
-        targetContainer = targetContainer.superview;
-    }
-    if (!targetContainer) targetContainer = self;
-
-    UIView *window = targetContainer.superview;
-    if (!window) return;
-
-    CGPoint translation = [pan translationInView:window];
-
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        if (!_isLocked) {
-            [self bringToFullAlpha];
-            [self.idleTimer invalidate];
-        }
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
-        targetContainer.center = CGPointMake(targetContainer.center.x + translation.x, targetContainer.center.y + translation.y);
-        [pan setTranslation:CGPointZero inView:window];
-    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        CGFloat midX = window.bounds.size.width / 2.0;
-        CGFloat targetX = (targetContainer.center.x < midX) ? (targetContainer.frame.size.width / 2.0 + 8) : (window.bounds.size.width - targetContainer.frame.size.width / 2.0 - 8);
-        CGFloat targetY = MIN(MAX(targetContainer.center.y, 60), window.bounds.size.height - 60);
-
-        [UIView animateWithDuration:0.25 animations:^{
-            targetContainer.center = CGPointMake(targetX, targetY);
-        } completion:^(BOOL finished) {
-            if (!_isLocked) [self resetIdleTimer];
-        }];
-    }
-}
-
-- (void)bringToFullAlpha {
-    if (_isLocked) return;
-    [UIView animateWithDuration:0.2 animations:^{
-        self.alpha = 1.0;
-    }];
-}
-
-- (void)resetIdleTimer {
-    if (_isLocked) return;
-    [self bringToFullAlpha];
-    [self.idleTimer invalidate];
-    self.idleTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self selector:@selector(dimButton) userInfo:nil repeats:NO];
-}
-
-- (void)dimButton {
-    [UIView animateWithDuration:0.5 animations:^{
-        self.alpha = 0.2;
-    }];
-}
-
-@end
-
-// ==========================================
-// QUẢN LÝ BẢN QUYỀN
-// ==========================================
-@interface KeyAuthManager : NSObject <SpeedhackButtonDelegate>
-@property (nonatomic, strong) SecureContainerView *secureContainer;
-@property (nonatomic, strong) SpeedhackFloatingButton *floatingButton;
-@property (nonatomic, strong) dispatch_source_t heartbeatSource;
+@interface AuthManager : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIWindow *appWindow;
+@property (nonatomic, strong) UILongPressGestureRecognizer *tripleFingerGesture;
+@property (nonatomic, strong) dispatch_source_t heartbeatTimer;
 @end
 
-@implementation KeyAuthManager
+@implementation AuthManager
 
-static KeyAuthManager *sharedAuth = nil;
+static AuthManager *sharedAuth = nil;
 
 + (instancetype)sharedInstance {
     return sharedAuth;
 }
 
 + (void)load {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *window = [self getKeyWindow];
-        if (window && window.rootViewController) {
-            sharedAuth = [[KeyAuthManager alloc] init];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *window = [self findActiveWindow];
+        if (window) {
+            sharedAuth = [[AuthManager alloc] init];
             sharedAuth.appWindow = window;
-            
-            sync_time_from_internet(^(BOOL success) {
-                [sharedAuth initialSetup];
-            });
+            [sharedAuth setupGesture];
+            [sharedAuth startHeartbeat];
         }
     });
 }
 
-+ (UIWindow *)getKeyWindow {
++ (UIWindow *)findActiveWindow {
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
                 UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) return window;
+                for (UIWindow *w in windowScene.windows) {
+                    if (w.isKeyWindow) return w;
                 }
             }
         }
@@ -494,198 +52,246 @@ static KeyAuthManager *sharedAuth = nil;
 
 - (NSString *)getDeviceID {
     NSString *uuid = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-    if (!uuid) return @"UNKNOWN-ID";
+    if (!uuid) return @"UNKNOWN0";
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 }
 
-- (BOOL)validateKeyFormat:(NSString *)key outPlanDuration:(uint64_t *)outDuration outNonce:(NSString **)outNonce {
-    NSArray *parts = [key componentsSeparatedByString:@"-"];
-    if (parts.count != 4) return NO;
+// Cử chỉ chạm giữ 3 ngón tay trong 3 giây
+- (void)setupGesture {
+    if (!self.appWindow) return;
 
-    NSString *planCode = parts[0];
-    NSString *keyDeviceID = parts[1];
-    NSString *nonce = parts[2];
-    NSString *receivedSign = parts[3];
+    self.tripleFingerGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleTripleFingerLongPress:)];
+    self.tripleFingerGesture.numberOfTouchesRequired = 3;
+    self.tripleFingerGesture.minimumPressDuration = 3.0;
+    self.tripleFingerGesture.cancelsTouchesInView = NO;
+    self.tripleFingerGesture.delegate = self;
 
-    NSString *myDeviceID = [self getDeviceID];
-    if (![keyDeviceID isEqualToString:myDeviceID]) return NO;
+    [self.appWindow addGestureRecognizer:self.tripleFingerGesture];
+}
 
-    NSString *expectedSign = generate_signature(planCode, myDeviceID, nonce);
-    if (![receivedSign isEqualToString:expectedSign]) return NO;
-
-    uint64_t duration = parse_duration_from_plan(planCode);
-    if (duration == 0) return NO;
-
-    if (outDuration) *outDuration = duration;
-    if (outNonce) *outNonce = nonce;
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     return YES;
 }
 
-- (void)initialSetup {
-    if (!self.floatingButton && self.appWindow) {
-        // Khởi tạo container bảo mật chống chụp màn hình
-        self.secureContainer = [[SecureContainerView alloc] initWithFrame:CGRectMake(self.appWindow.bounds.size.width - 54, 120, 46, 46)];
-        
-        self.floatingButton = [[SpeedhackFloatingButton alloc] initWithFrame:self.secureContainer.bounds];
-        self.floatingButton.delegate = self;
-        self.floatingButton.userInteractionEnabled = YES;
-
-        [self.secureContainer.canvasContainer addSubview:self.floatingButton];
-        [self.appWindow addSubview:self.secureContainer];
-        [self.appWindow bringSubviewToFront:self.secureContainer];
-    }
-    [self checkLicenseValidity];
-}
-
-- (void)checkLicenseValidity {
-    NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:KEY_STORAGE];
-    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    uint64_t now = get_current_real_time();
-
-    if (savedKey && [self validateKeyFormat:savedKey outPlanDuration:NULL outNonce:NULL] && now < expireTime) {
-        [self.floatingButton setLockedState:NO];
-        [self startHeartbeat];
-    } else {
-        [self lockSpeedhack];
+- (void)handleTripleFingerLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        if (@available(iOS 10.0, *)) {
+            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+            [feedback impactOccurred];
+        }
+        [self showMainInterface];
     }
 }
 
+// Kiểm tra ngầm định kỳ mỗi 3 phút
 - (void)startHeartbeat {
-    [self stopHeartbeat];
-    self.heartbeatSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(self.heartbeatSource, dispatch_walltime(NULL, 0), 1ull * NSEC_PER_SEC, 0);
+    [self autoCheckLicense];
 
+    self.heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(self.heartbeatTimer, dispatch_walltime(NULL, 0), 180ull * NSEC_PER_SEC, 10ull * NSEC_PER_SEC);
     __weak typeof(self) weakSelf = self;
-    dispatch_source_set_event_handler(self.heartbeatSource, ^{
-        [weakSelf checkExpirationHeartbeat];
+    dispatch_source_set_event_handler(self.heartbeatTimer, ^{
+        [weakSelf autoCheckLicense];
     });
-    dispatch_resume(self.heartbeatSource);
+    dispatch_resume(self.heartbeatTimer);
 }
 
-- (void)stopHeartbeat {
-    if (self.heartbeatSource) {
-        dispatch_source_cancel(self.heartbeatSource);
-        self.heartbeatSource = nil;
+- (void)autoCheckLicense {
+    NSString *phone = [[NSUserDefaults standardUserDefaults] stringForKey:USER_PHONE_KEY];
+    if (!phone || phone.length == 0) return;
+
+    NSString *deviceId = [self getDeviceID];
+    NSString *urlStr = [NSString stringWithFormat:@"%@?action=check&phone=%@&device_id=%@",
+                        GOOGLE_SHEET_API_URL,
+                        [phone stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                        deviceId];
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:15.0];
+    req.HTTPMethod = @"GET";
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
+        if (!err && data) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                BOOL active = [json[@"is_active"] boolValue];
+                NSInteger sec = [json[@"trigger_second"] integerValue];
+                NSString *status = json[@"status"] ?: @"PENDING";
+                NSString *expire = json[@"expire_at"] ?: @"";
+
+                [[NSUserDefaults standardUserDefaults] setBool:active forKey:USER_ACTIVE_KEY];
+                [[NSUserDefaults standardUserDefaults] setObject:status forKey:USER_STATUS_KEY];
+                [[NSUserDefaults standardUserDefaults] setObject:expire forKey:USER_EXPIRE_KEY];
+                if (sec > 0) {
+                    [[NSUserDefaults standardUserDefaults] setInteger:sec forKey:USER_TRIGGER_SEC_KEY];
+                }
+                [[NSUserDefaults standardUserDefaults] synchronize];
+            }
+        }
+    }] resume];
+}
+
+// Điều hướng giao diện: Nếu đã có tài khoản thì hiện Dashboard, nếu chưa thì hiện Form Đăng nhập
+- (void)showMainInterface {
+    NSString *savedPhone = [[NSUserDefaults standardUserDefaults] stringForKey:USER_PHONE_KEY];
+    if (savedPhone && savedPhone.length > 0) {
+        [self showDashboardDialog];
+    } else {
+        [self showAuthInputDialog];
     }
 }
 
-- (void)checkExpirationHeartbeat {
-    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    uint64_t now = get_current_real_time();
-
-    if (now >= expireTime) {
-        [self lockSpeedhack];
-    }
-}
-
-- (void)lockSpeedhack {
-    [self stopHeartbeat];
-
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:KEY_STORAGE];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:EXPIRE_STORAGE];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-
-    [self.floatingButton setLockedState:YES];
-}
-
-- (void)onOpenKeyDialog {
-    NSString *deviceID = [self getDeviceID];
-    [self showKeyInputDialogOn:self.appWindow.rootViewController deviceID:deviceID];
-}
-
-- (void)showKeyInputDialogOn:(UIViewController *)rootVC deviceID:(NSString *)deviceID {
+// Bảng thông tin khi đã đăng nhập
+- (void)showDashboardDialog {
+    UIViewController *rootVC = self.appWindow.rootViewController;
+    while (rootVC.presentedViewController) rootVC = rootVC.presentedViewController;
     if (!rootVC) return;
 
-    double expireTime = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-    uint64_t now = get_current_real_time();
-    NSString *statusInfo = @"";
+    NSString *phone = [[NSUserDefaults standardUserDefaults] stringForKey:USER_PHONE_KEY];
+    NSString *status = [[NSUserDefaults standardUserDefaults] stringForKey:USER_STATUS_KEY] ?: @"PENDING";
+    NSString *expire = [[NSUserDefaults standardUserDefaults] stringForKey:USER_EXPIRE_KEY] ?: @"Chưa kích hoạt";
+    NSInteger sec = [[NSUserDefaults standardUserDefaults] integerForKey:USER_TRIGGER_SEC_KEY];
+    if (sec <= 0) sec = 3;
 
-    if (now < expireTime) {
-        NSInteger remainingSec = (NSInteger)(expireTime - now);
-        NSInteger days = remainingSec / 86400;
-        NSInteger hours = (remainingSec % 86400) / 3600;
-        NSInteger minutes = (remainingSec % 3600) / 60;
-        statusInfo = [NSString stringWithFormat:@"\nTrạng thái: Còn %ld ngày %ld giờ %ld phút\n(Nhập Key mới để gia hạn thêm)", (long)days, (long)hours, (long)minutes];
-    }
+    NSString *msg = [NSString stringWithFormat:@"Tài khoản: %@\nID Máy: %@\nTrạng thái: %@\nHạn dùng: %@\nMốc bứt tốc: %ld giây",
+                     phone, [self getDeviceID], status, expire, (long)sec];
 
-    NSString *title = @"KÍCH HOẠT BẢN QUYỀN";
-    NSString *msg = [NSString stringWithFormat:@"Mã thiết bị của bạn:\n%@%@\n\n(Sao chép mã gửi Admin để nhận Key)", deviceID, statusInfo];
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title 
-                                                                   message:msg 
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"THÔNG TIN TÀI KHOẢN"
+                                                                   message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
 
-    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.placeholder = @"Dán mã Key vào đây";
-        textField.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
-    }];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"Sao Chép Mã Máy" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        [UIPasteboard generalPasteboard].string = deviceID;
-        [self showKeyInputDialogOn:rootVC deviceID:deviceID];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Đồng Bộ Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self autoCheckLicense];
     }]];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Kích Hoạt" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        NSString *rawInput = alert.textFields.firstObject.text;
-        NSString *inputKey = [rawInput stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
-
-        uint64_t planDuration = 0;
-        NSString *nonce = nil;
-
-        if (![self validateKeyFormat:inputKey outPlanDuration:&planDuration outNonce:&nonce]) {
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
-                                                                         message:@"Mã Key không chính xác hoặc không áp dụng cho thiết bị này!" 
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Nhập Lại" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
-                [self showKeyInputDialogOn:rootVC deviceID:deviceID];
-            }]];
-            [rootVC presentViewController:err animated:YES completion:nil];
-            return;
-        }
-
-        if (is_nonce_already_used(nonce)) {
-            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Thông Báo" 
-                                                                         message:@"Mã Key này đã được kích hoạt trước đó và không thể tái sử dụng!" 
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-            [err addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-            [rootVC presentViewController:err animated:YES completion:nil];
-            return;
-        }
-
-        sync_time_from_internet(^(BOOL success) {
-            save_nonce_to_keychain(nonce);
-
-            uint64_t currentExpire = [[NSUserDefaults standardUserDefaults] doubleForKey:EXPIRE_STORAGE];
-            uint64_t nowReal = get_current_real_time();
-            uint64_t baseTime = (nowReal < currentExpire) ? currentExpire : nowReal;
-            uint64_t newExpire = baseTime + planDuration;
-
-            [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:KEY_STORAGE];
-            [[NSUserDefaults standardUserDefaults] setDouble:(double)newExpire forKey:EXPIRE_STORAGE];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-
-            [self.floatingButton setLockedState:NO];
-            [self startHeartbeat];
-
-            UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Thành Công" 
-                                                                                  message:@"Bản quyền đã được kích hoạt thành công!" 
-                                                                           preferredStyle:UIAlertControllerStyleAlert];
-            [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [rootVC presentViewController:successAlert animated:YES completion:nil];
-        });
+    [alert addAction:[UIAlertAction actionWithTitle:@"Đăng Xuất" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:USER_PHONE_KEY];
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:USER_PASS_KEY];
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:USER_ACTIVE_KEY];
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:USER_STATUS_KEY];
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:USER_EXPIRE_KEY];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        [self showAuthInputDialog];
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-
     [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)triggerButtonBurstEffect:(BOOL)active {
-    [self.floatingButton showBurstEffect:active];
+// Bảng Đăng nhập & Đăng ký
+- (void)showAuthInputDialog {
+    UIViewController *rootVC = self.appWindow.rootViewController;
+    while (rootVC.presentedViewController) rootVC = rootVC.presentedViewController;
+    if (!rootVC) return;
+
+    NSString *msg = [NSString stringWithFormat:@"ID Thiết bị: %@\n(Chưa đăng nhập)", [self getDeviceID]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"HỆ THỐNG XÁC THỰC"
+                                                                   message:msg
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"Nhập Số Điện Thoại";
+        textField.keyboardType = UIKeyboardTypePhonePad;
+    }];
+
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"Nhập Mật Khẩu";
+        textField.secureTextEntry = YES;
+    }];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Đăng Nhập" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *phone = alert.textFields[0].text;
+        NSString *pass = alert.textFields[1].text;
+        [self performAuthAction:@"login" phone:phone password:pass];
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Tạo Tài Khoản Mới" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *phone = alert.textFields[0].text;
+        NSString *pass = alert.textFields[1].text;
+        [self performAuthAction:@"register" phone:phone password:pass];
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [rootVC presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)performAuthAction:(NSString *)action phone:(NSString *)phone password:(NSString *)password {
+    phone = [phone stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    password = [password stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    if (phone.length == 0 || password.length == 0) {
+        [self showAlertMessage:@"Vui lòng điền đủ SĐT và Mật khẩu!"];
+        return;
+    }
+
+    NSString *deviceId = [self getDeviceID];
+    NSString *urlStr = [NSString stringWithFormat:@"%@?action=%@&phone=%@&password=%@&device_id=%@",
+                        GOOGLE_SHEET_API_URL, action,
+                        [phone stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                        [password stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                        deviceId];
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:15.0];
+    req.HTTPMethod = @"GET";
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (err) {
+                [self showAlertMessage:[NSString stringWithFormat:@"Lỗi mạng: %@", err.localizedDescription]];
+                return;
+            }
+
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                BOOL success = [json[@"success"] boolValue];
+                NSString *message = json[@"message"] ?: @"Đã xử lý";
+
+                if (success) {
+                    [[NSUserDefaults standardUserDefaults] setObject:phone forKey:USER_PHONE_KEY];
+                    [[NSUserDefaults standardUserDefaults] setObject:password forKey:USER_PASS_KEY];
+
+                    BOOL active = [json[@"is_active"] boolValue];
+                    NSInteger sec = [json[@"trigger_second"] integerValue];
+                    NSString *status = json[@"status"] ?: (active ? @"ACTIVE" : @"PENDING");
+                    NSString *expire = json[@"expire_at"] ?: @"";
+
+                    [[NSUserDefaults standardUserDefaults] setBool:active forKey:USER_ACTIVE_KEY];
+                    [[NSUserDefaults standardUserDefaults] setObject:status forKey:USER_STATUS_KEY];
+                    [[NSUserDefaults standardUserDefaults] setObject:expire forKey:USER_EXPIRE_KEY];
+                    if (sec > 0) {
+                        [[NSUserDefaults standardUserDefaults] setInteger:sec forKey:USER_TRIGGER_SEC_KEY];
+                    }
+                    [[NSUserDefaults standardUserDefaults] synchronize];
+                }
+
+                [self showAlertMessage:message];
+            }
+        });
+    }] resume];
+}
+
+- (void)showAlertMessage:(NSString *)msg {
+    UIViewController *rootVC = self.appWindow.rootViewController;
+    while (rootVC.presentedViewController) rootVC = rootVC.presentedViewController;
+    if (!rootVC) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Thông Báo"
+                                                                   message:msg
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
 @end
 
-void notify_burst_state_to_button(BOOL active) {
-    [[KeyAuthManager sharedInstance] triggerButtonBurstEffect:active];
+BOOL is_license_active(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:USER_ACTIVE_KEY];
+}
+
+NSInteger get_current_trigger_second(void) {
+    NSInteger sec = [[NSUserDefaults standardUserDefaults] integerForKey:USER_TRIGGER_SEC_KEY];
+    return (sec > 0) ? sec : 3;
 }
