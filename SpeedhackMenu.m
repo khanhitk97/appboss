@@ -1,8 +1,6 @@
 #import <UIKit/UIKit.h>
 
-// ==========================================
-// CẤU HÌNH API GOOGLE SHEETS
-// ==========================================
+// URL Web App Google Apps Script của bạn
 #define GOOGLE_SHEET_API_URL @"https://script.google.com/macros/s/AKfycbz6gvfUZuyuO8-BW8tRVkoTFGPvZNu_eJPz1JtI9AuVnUQd2NLKcMCCQ4wBckVPPg5V/exec"
 
 #define USER_PHONE_KEY @"SAVED_USER_PHONE"
@@ -19,6 +17,14 @@ extern void set_speed_factor(float factor);
 #ifdef __cplusplus
 }
 #endif
+
+// Hàm kiểm tra trạng thái khóa cứng
+static inline BOOL is_device_blocked(void) {
+    NSString *status = [[NSUserDefaults standardUserDefaults] stringForKey:USER_STATUS_KEY];
+    if (!status) return NO;
+    status = [status stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].uppercaseString;
+    return ([status isEqualToString:@"BLOCK"] || [status isEqualToString:@"BLOCKED"] || [status isEqualToString:@"LOCKED"]);
+}
 
 @interface AuthManager : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIWindow *appWindow;
@@ -67,7 +73,6 @@ static AuthManager *sharedAuth = nil;
     return [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:8].uppercaseString;
 }
 
-// Bắt sự kiện khi app mở lại từ màn hình khóa hoặc từ ứng dụng khác chuyển sang
 - (void)setupAppStateObservers {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleAppDidBecomeActive)
@@ -79,7 +84,6 @@ static AuthManager *sharedAuth = nil;
     [self autoCheckLicense];
 }
 
-// Cử chỉ chạm giữ 3 ngón tay trong 3 giây
 - (void)setupGesture {
     if (!self.appWindow) return;
 
@@ -92,12 +96,27 @@ static AuthManager *sharedAuth = nil;
     [self.appWindow addGestureRecognizer:self.tripleFingerGesture];
 }
 
+// CHẶN TẬN GỐC: Không nhận bất kỳ cú chạm nào nếu đang bị BLOCK
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (is_device_blocked()) {
+        return NO;
+    }
+    return YES;
+}
+
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     return YES;
 }
 
+// Xử lý khi nhấn giữ 3 ngón tay 3 giây
 - (void)handleTripleFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        // Lớp bảo vệ 2: Kiểm tra lại một lần nữa
+        if (is_device_blocked()) {
+            set_speed_factor(1.0f);
+            return;
+        }
+
         if (@available(iOS 10.0, *)) {
             UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
             [feedback impactOccurred];
@@ -106,7 +125,7 @@ static AuthManager *sharedAuth = nil;
     }
 }
 
-// Kiểm tra ngầm định kỳ mỗi 60 giây (1 phút) để đồng bộ nhanh hơn
+// Kiểm tra ngầm định kỳ mỗi 60 giây
 - (void)startHeartbeat {
     [self autoCheckLicense];
 
@@ -124,13 +143,15 @@ static AuthManager *sharedAuth = nil;
     if (!phone || phone.length == 0) return;
 
     NSString *deviceId = [self getDeviceID];
-    NSString *urlStr = [NSString stringWithFormat:@"%@?action=check&phone=%@&device_id=%@",
+    // Thêm tham số timestamp `&t=` để chống iOS lưu cache HTTP
+    NSTimeInterval timestamp = [[NSDate date] timeIntervalSince1970];
+    NSString *urlStr = [NSString stringWithFormat:@"%@?action=check&phone=%@&device_id=%@&t=%.0f",
                         GOOGLE_SHEET_API_URL,
                         [phone stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-                        deviceId];
+                        deviceId, timestamp];
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]
-                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData
                                                    timeoutInterval:10.0];
     req.HTTPMethod = @"GET";
 
@@ -152,9 +173,15 @@ static AuthManager *sharedAuth = nil;
                     }
                     [[NSUserDefaults standardUserDefaults] synchronize];
 
-                    // Nếu phát hiện trạng thái không còn active thì reset tốc độ ngay lập tức
-                    if (!active) {
+                    // Nếu bị BLOCK hoặc LOCKED -> Lập tức ép tốc độ về 1.0x và đóng mọi popup đang mở
+                    if (is_device_blocked() || !active) {
                         set_speed_factor(1.0f);
+                        if (is_device_blocked()) {
+                            UIViewController *rootVC = self.appWindow.rootViewController;
+                            if (rootVC.presentedViewController) {
+                                [rootVC dismissViewControllerAnimated:YES completion:nil];
+                            }
+                        }
                     }
                 });
             }
@@ -163,6 +190,9 @@ static AuthManager *sharedAuth = nil;
 }
 
 - (void)showMainInterface {
+    // Lớp bảo vệ 3: Tuyệt đối không mở nếu đang bị BLOCK
+    if (is_device_blocked()) return;
+
     NSString *savedPhone = [[NSUserDefaults standardUserDefaults] stringForKey:USER_PHONE_KEY];
     if (savedPhone && savedPhone.length > 0) {
         [self showDashboardDialog];
@@ -171,8 +201,9 @@ static AuthManager *sharedAuth = nil;
     }
 }
 
-// Bảng thông tin khi đã đăng nhập
 - (void)showDashboardDialog {
+    if (is_device_blocked()) return;
+
     UIViewController *rootVC = self.appWindow.rootViewController;
     while (rootVC.presentedViewController) rootVC = rootVC.presentedViewController;
     if (!rootVC) return;
@@ -183,7 +214,6 @@ static AuthManager *sharedAuth = nil;
     NSInteger sec = [[NSUserDefaults standardUserDefaults] integerForKey:USER_TRIGGER_SEC_KEY];
     if (sec <= 0) sec = 3;
 
-    // Tính thời gian còn lại trực tiếp
     NSString *remainingTimeStr = @"";
     if (expire.length > 0) {
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
@@ -235,8 +265,9 @@ static AuthManager *sharedAuth = nil;
     [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
-// Bảng Đăng nhập & Đăng ký
 - (void)showAuthInputDialog {
+    if (is_device_blocked()) return;
+
     UIViewController *rootVC = self.appWindow.rootViewController;
     while (rootVC.presentedViewController) rootVC = rootVC.presentedViewController;
     if (!rootVC) return;
@@ -282,14 +313,15 @@ static AuthManager *sharedAuth = nil;
     }
 
     NSString *deviceId = [self getDeviceID];
-    NSString *urlStr = [NSString stringWithFormat:@"%@?action=%@&phone=%@&password=%@&device_id=%@",
+    NSTimeInterval timestamp = [[NSDate date] timeIntervalSince1970];
+    NSString *urlStr = [NSString stringWithFormat:@"%@?action=%@&phone=%@&password=%@&device_id=%@&t=%.0f",
                         GOOGLE_SHEET_API_URL, action,
                         [phone stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
                         [password stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-                        deviceId];
+                        deviceId, timestamp];
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]
-                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData
                                                    timeoutInterval:15.0];
     req.HTTPMethod = @"GET";
 
@@ -322,7 +354,7 @@ static AuthManager *sharedAuth = nil;
                     }
                     [[NSUserDefaults standardUserDefaults] synchronize];
 
-                    if (!active) {
+                    if (!active || is_device_blocked()) {
                         set_speed_factor(1.0f);
                     }
                 }
@@ -347,17 +379,19 @@ static AuthManager *sharedAuth = nil;
 
 @end
 
-// ==========================================
-// KIỂM TRA BẢN QUYỀN TRỰC TIẾP TỪ THỜI GIAN THỰC
-// ==========================================
+// Kiểm tra bản quyền thời gian thực
 BOOL is_license_active(void) {
+    if (is_device_blocked()) {
+        set_speed_factor(1.0f);
+        return NO;
+    }
+
     BOOL isActiveFlag = [[NSUserDefaults standardUserDefaults] boolForKey:USER_ACTIVE_KEY];
     if (!isActiveFlag) return NO;
 
     NSString *expireStr = [[NSUserDefaults standardUserDefaults] stringForKey:USER_EXPIRE_KEY];
     if (!expireStr || expireStr.length == 0) return NO;
 
-    // So sánh trực tiếp giờ hiện tại với mốc hết hạn
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     [df setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
     [df setTimeZone:[NSTimeZone timeZoneWithName:@"GMT+7"]];
@@ -365,7 +399,6 @@ BOOL is_license_active(void) {
 
     if (expireDate) {
         if ([[NSDate date] compare:expireDate] == NSOrderedDescending) {
-            // Đã quá giờ hết hạn -> tự động ngắt cờ active
             [[NSUserDefaults standardUserDefaults] setBool:NO forKey:USER_ACTIVE_KEY];
             [[NSUserDefaults standardUserDefaults] setObject:@"EXPIRED" forKey:USER_STATUS_KEY];
             [[NSUserDefaults standardUserDefaults] synchronize];
